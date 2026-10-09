@@ -1,5 +1,9 @@
 #pragma once
 #include <QAbstractScrollArea>
+#include <QApplication>
+#include <QInputMethod>
+#include <QTabWidget>
+#include <QTabBar>
 #include <QScroller>
 #include <QScrollerProperties>
 #include <QPointer>
@@ -23,17 +27,96 @@
 
 inline QPointer<QStackedWidget> mobileHost;
 inline int mobileTransition = 0;
+// The compositor may resize the window, or report an overlapping keyboard.
+// Handle either route without subtracting the keyboard height twice.
+class MobileInputController : public QObject {
+    QWidget *host;
+    bool pending = false;
+    void schedule() {
+        if (pending) return;
+        pending = true;
+        QTimer::singleShot(0, this, [this] {
+            pending = false;
+            auto *input = QGuiApplication::inputMethod();
+            updateViewport(input->isVisible() ? input->keyboardRectangle() : QRectF());
+        });
+    }
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override {
+        if (object == host && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) schedule();
+        return false;
+    }
+public:
+    explicit MobileInputController(QWidget *window) : QObject(window), host(window) {
+        host->installEventFilter(this);
+        connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *now) {
+            if (now && host->isAncestorOf(now) && now->testAttribute(Qt::WA_InputMethodEnabled)) schedule();
+        });
+        auto *input = QGuiApplication::inputMethod();
+        connect(input, &QInputMethod::keyboardRectangleChanged, this, [this]{ schedule(); });
+        connect(input, &QInputMethod::visibleChanged, this, [this]{ schedule(); });
+        connect(input, &QInputMethod::animatingChanged, this, [this]{ schedule(); });
+    }
+    void updateViewport(const QRectF &keyboard) {
+        if (!host->layout()) return;
+        // QInputMethod rectangles use window logical coordinates, not screen pixels.
+        const QRectF overlap = QRectF(host->rect()).intersected(keyboard);
+        const int bottom = overlap.isEmpty() ? 0 : qMax(0, host->height()-qFloor(overlap.top()));
+        auto margins=host->layout()->contentsMargins();
+        if (margins.bottom()!=bottom) {
+            margins.setBottom(bottom); host->layout()->setContentsMargins(margins);
+            host->layout()->activate();
+        }
+        QTimer::singleShot(0, this, [this]{ revealEditor(); });
+    }
+    void revealEditor() {
+        auto *editor=QApplication::focusWidget();
+        if (!editor || !host->isAncestorOf(editor) || !editor->isVisible() || !editor->testAttribute(Qt::WA_InputMethodEnabled)) return;
+        // Only react to focus/keyboard/window changes, never to the user's scroll.
+        for (auto *parent=editor->parentWidget(); parent && parent!=host; parent=parent->parentWidget()) {
+            if (auto *scroll=qobject_cast<QScrollArea *>(parent)) {
+                if (scroll->widget() && scroll->widget()->isAncestorOf(editor)) {
+                    if (scroll->widget()->layout()) scroll->widget()->layout()->activate();
+                    scroll->ensureWidgetVisible(editor,12,24);
+                }
+            }
+        }
+    }
+};
+
+// Hidden source pages must not force empty space into the active install form.
+class MobileSourceTabs : public QTabWidget {
+public:
+    explicit MobileSourceTabs(QWidget *parent=nullptr) : QTabWidget(parent) { setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum); }
+    QSize minimumSizeHint() const override {
+        return currentWidget() ? currentWidget()->minimumSizeHint()+QSize(8,8) : QSize(0,0);
+    }
+    QSize sizeHint() const override {
+        return currentWidget() ? currentWidget()->sizeHint()+QSize(8,8) : QSize(0,0);
+    }
+};
 inline bool allowListActivation(QListWidget *list) {
     auto *viewport = list->viewport();
     return QScroller::scroller(viewport)->state() == QScroller::Inactive && viewport->property("shelfScrollUntil").toLongLong() < QDateTime::currentMSecsSinceEpoch();
 }
 inline void enableTouchScrolling(QWidget *root) {
+    for (auto *button : root->findChildren<QPushButton *>()) button->setFocusPolicy(Qt::TabFocus);
     const auto areas = root->findChildren<QAbstractScrollArea *>();
     for (auto *area : areas) {
         if (area->property("shelfTouchReady").toBool()) continue;
         area->setProperty("shelfTouchReady", true);
         area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        if (auto *list = qobject_cast<QAbstractItemView *>(area)) list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        // Background drags should scroll, not transfer focus away from the editor.
+        // Keep list/text editor focus policies intact for keyboard accessibility.
+        if (qobject_cast<QScrollArea *>(area)) {
+            area->setFocusPolicy(Qt::NoFocus);
+            area->viewport()->setFocusPolicy(Qt::NoFocus);
+        }
+        if (auto *list = qobject_cast<QAbstractItemView *>(area)) {
+            list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+            list->setFocusPolicy(Qt::TabFocus);
+            list->viewport()->setFocusPolicy(Qt::NoFocus);
+        }
         QScroller::grabGesture(area->viewport(), QScroller::TouchGesture);
         QObject::connect(QScroller::scroller(area->viewport()), &QScroller::stateChanged, area, [area](QScroller::State state) {
             if (state == QScroller::Dragging || state == QScroller::Scrolling) area->viewport()->setProperty("shelfScrollUntil", QDateTime::currentMSecsSinceEpoch() + 350);
@@ -87,7 +170,7 @@ public:
     void setVisible(bool visible) override {
         if (changing || mobileTransition) { QDialog::setVisible(visible); return; }
         if (visible && !mounted && mobileHost) {
-            prepare(); changing = true; ++mobileTransition; previous = mobileHost->currentWidget();
+            prepare(); setMinimumHeight(0); changing = true; ++mobileTransition; previous = mobileHost->currentWidget();
             mobileHost->addWidget(this); mounted = true; mobileHost->setCurrentWidget(this); --mobileTransition; changing = false;
         } else if (!visible) detach();
         QDialog::setVisible(visible);

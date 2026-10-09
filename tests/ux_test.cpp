@@ -20,12 +20,14 @@
 #include <QLabel>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QScopeGuard>
 #include <QTcpServer>
 #include <QElapsedTimer>
 #include <memory>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include "../src/apk_icon.h"
+#include "../src/mobile_ui.h"
 
 QWidget *createShelfForTests();
 QWidget *currentPageForTests();
@@ -89,6 +91,75 @@ private slots:
         button(w.get(),"Clear private data…")->click(); QVERIFY(!QFile::exists(data));
         QVERIFY(QFile::exists(dataRoot+"/ATL Shelf/atl-shelf/apps/immich/app.apk"));
         QVERIFY(button(w.get(),"Open app")->isVisible());
+    }
+    void keyboardKeepsEditorVisibleAndScrollingPreservesFocus() {
+        std::unique_ptr<QWidget> w(createShelfForTests()); w->resize(408,794); w->show(); w->activateWindow(); QTest::qWait(80);
+        QTimer::singleShot(50,[&] {
+            auto *page=qobject_cast<QDialog *>(currentPageForTests()); QVERIFY(page);
+            page->findChild<QComboBox *>("sourcePicker")->setCurrentIndex(1);
+            const auto closePage=qScopeGuard([page]{ page->reject(); });
+            auto *field=page->findChild<QLineEdit *>("installName"); QVERIFY(field);
+            auto *scroll=page->findChild<QScrollArea *>(); QVERIFY(scroll);
+            MobileInputController *controller=nullptr;
+            for (auto *object : w->children()) if ((controller=dynamic_cast<MobileInputController *>(object))) break;
+            QVERIFY(controller);
+            field->setFocus(); QTest::qWait(30); QCOMPARE(QApplication::focusWidget(),field);
+            const int originalHeight=scroll->viewport()->height();
+            controller->updateViewport(QRectF(0,440,408,354)); QTest::qWait(80);
+            QVERIFY(scroll->viewport()->height()<originalHeight);
+            QVERIFY(field->mapTo(scroll->viewport(),QPoint()).y()>=0);
+            QVERIFY(field->mapTo(scroll->viewport(),QPoint(0,field->height())).y()<=scroll->viewport()->height());
+            QTest::keyClicks(field,"Visible input"); QCOMPARE(field->text(),QString("Visible input"));
+            auto *viewport=scroll->viewport();
+            const int before=scroll->verticalScrollBar()->value(); QVERIFY(before>0);
+            static auto *device=QTest::createTouchDevice();
+            QTest::touchEvent(viewport,device).press(0,QPoint(3,40),viewport); QTest::qWait(30);
+            QTest::touchEvent(viewport,device).move(0,QPoint(3,100),viewport); QTest::qWait(30);
+            QTest::touchEvent(viewport,device).move(0,QPoint(3,180),viewport); QTest::qWait(30);
+            QTest::touchEvent(viewport,device).release(0,QPoint(3,180),viewport);
+            QTRY_VERIFY(scroll->verticalScrollBar()->value()<before);
+            QCOMPARE(QApplication::focusWidget(),field);
+            QScroller::scroller(viewport)->stop();
+            controller->updateViewport({}); QTest::qWait(50);
+            QCOMPARE(scroll->viewport()->height(),originalHeight);
+            // A compositor-resized window must also reveal the field, without an inset.
+            w->resize(408,440); QTest::qWait(80);
+            QCOMPARE(w->layout()->contentsMargins().bottom(),0);
+            QVERIFY(field->mapTo(scroll->viewport(),QPoint(0,field->height())).y()<=scroll->viewport()->height());
+            page->reject();
+        });
+        button(w.get(),"＋  Add app")->click();
+    }
+    void plasmaKeyboardIntegration() {
+        if (!qEnvironmentVariableIsSet("SHELF_TEST_REAL_KEYBOARD")) QSKIP("Requires an active Plasma Mobile session");
+        std::unique_ptr<QWidget> w(createShelfForTests()); w->showMaximized(); w->activateWindow(); QTest::qWait(500);
+        QTimer::singleShot(100,[&] {
+            auto *page=qobject_cast<QDialog *>(currentPageForTests()); QVERIFY(page);
+            const auto closePage=qScopeGuard([page]{ page->reject(); });
+            page->findChild<QComboBox *>("sourcePicker")->setCurrentIndex(1);
+            auto *field=page->findChild<QLineEdit *>("installName"); QVERIFY(field);
+            auto *scroll=page->findChild<QScrollArea *>(); QVERIFY(scroll);
+            const int heightBefore=w->height();
+            field->setFocus(); QGuiApplication::inputMethod()->show();
+            QProcess keyboard; keyboard.start("qdbus6",{"org.kde.KWin","/VirtualKeyboard","org.kde.kwin.VirtualKeyboard.forceActivate"});
+            QVERIFY(keyboard.waitForFinished(3000)); QCOMPARE(keyboard.exitCode(),0);
+            QTest::qWait(1500);
+            qInfo() << "Keyboard:" << QGuiApplication::inputMethod()->isVisible() << QGuiApplication::inputMethod()->keyboardRectangle() << "window heights:" << heightBefore << w->height();
+            QVERIFY(QGuiApplication::inputMethod()->isVisible());
+            QVERIFY(w->height()<heightBefore || w->layout()->contentsMargins().bottom()>0);
+            QVERIFY(field->mapTo(scroll->viewport(),QPoint()).y()>=0);
+            QVERIFY(field->mapTo(scroll->viewport(),QPoint(0,field->height())).y()<=scroll->viewport()->height());
+            QTest::keyClicks(field,"Keyboard test"); QCOMPARE(field->text(),QString("Keyboard test"));
+            auto *viewport=scroll->viewport(); static auto *device=QTest::createTouchDevice();
+            QTest::touchEvent(viewport,device).press(0,QPoint(3,40),viewport); QTest::qWait(30);
+            QTest::touchEvent(viewport,device).move(0,QPoint(3,100),viewport); QTest::qWait(30);
+            QTest::touchEvent(viewport,device).release(0,QPoint(3,100),viewport); QTest::qWait(100);
+            QCOMPARE(QApplication::focusWidget(),field);
+            QVERIFY(QGuiApplication::inputMethod()->isVisible());
+            w->grab().save("/tmp/shelf-keyboard-native.png");
+            QGuiApplication::inputMethod()->hide();
+        });
+        button(w.get(),"＋  Add app")->click();
     }
     void cancelNetworkTransfer() {
         QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));

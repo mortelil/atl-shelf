@@ -646,9 +646,10 @@ class Shelf : public QWidget {
     Q_OBJECT
 public:
     Shelf() {
-        setWindowTitle("ATL Shelf"); fitDialog(*this, 520, 780); setMinimumSize(320, 400);
+        setWindowTitle("ATL Shelf"); fitDialog(*this, 520, 780); setMinimumSize(320, 240);
         setStyleSheet("QPushButton { padding: 10px 14px; min-height: 24px; border: 1px solid palette(midlight); background: palette(button); border-radius: 8px; } QPushButton[primary=\"true\"] { background: palette(highlight); color: palette(highlighted-text); border: none; font-weight: 600; } QLineEdit, QComboBox { padding: 7px; } QListWidget::item { padding: 11px; } QGroupBox { margin-top: 12px; font-weight: 600; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }");
         auto *rootLayout = new QVBoxLayout(this); rootLayout->setContentsMargins(0, 0, 0, 0);
+        new MobileInputController(this);
         shell = new QStackedWidget(this); shell->setObjectName("mobileHost"); mobileHost = shell; rootLayout->addWidget(shell);
         mainPage = new QWidget; shell->addWidget(mainPage);
         auto *outer = new QVBoxLayout(mainPage); outer->setContentsMargins(18, 16, 18, 16); outer->setSpacing(12);
@@ -735,7 +736,7 @@ public:
         runtimeLayout->addWidget(settings);
         const QSize displaySize = currentDisplay().pixels;
         auto *screenInfo = new QLabel(QString("Native display: %1 × %2 pixels. Rendering density follows your screen automatically.").arg(displaySize.width()).arg(displaySize.height())); screenInfo->setWordWrap(true); runtimeLayout->addWidget(screenInfo);
-        auto *explain = new QLabel("Android support is set up once and shared by all your apps. App updates and Android support updates are separate.\n\nApps run through Android Translation Layer. Compatibility varies by app."); explain->setWordWrap(true); runtimeLayout->addWidget(explain); runtimeLayout->addStretch(); pages->addWidget(runtimePage);
+        auto *explain = new QLabel("Android support is set up once and shared by all your apps. App updates and Android support updates are separate.\n\nApps run through Android Translation Layer. Compatibility varies by app."); explain->setWordWrap(true); runtimeLayout->addWidget(explain); runtimeLayout->addStretch(); auto *runtimeScroll = new QScrollArea; runtimeScroll->setWidgetResizable(true); runtimeScroll->setFrameShape(QFrame::NoFrame); runtimeScroll->setWidget(runtimePage); pages->addWidget(runtimeScroll);
         connect(settingsButton, &QPushButton::clicked, this, [this]{ previousMainPage = pages->currentIndex(); pages->setCurrentIndex(2); });
         connect(navBack, &QPushButton::clicked, this, [this]{ navigateBack(); });
         connect(pages, &QStackedWidget::currentChanged, this, [this, settingsButton, subtitle, heading](int index){ subtitle->setVisible(index == 0); heading->setText(index == 2 ? "Settings" : "ATL Shelf"); navBack->setEnabled(index != 0); settingsButton->setEnabled(index != 2); }); navBack->setEnabled(false);
@@ -1162,7 +1163,8 @@ private:
         if (atlPath->text().isEmpty() || !QFileInfo::exists(atlPath->text())) { configureRuntime(); if (!QFileInfo::exists(atlPath->text())) return; refreshWelcome(); }
         MobileDialog dialog(this); dialog.setWindowTitle("Add app"); fitDialog(dialog, 540, 720); dialog.setMinimumSize(300, 400);
         auto *layout = new QVBoxLayout(&dialog); auto *sourcePicker = new QComboBox(); sourcePicker->setObjectName("sourcePicker"); sourcePicker->addItems({"GitHub repository", "F-Droid catalogue", "APKMirror · browser download", "APK file on this device"}); layout->addWidget(sourcePicker);
-        auto *tabs = new QTabWidget(); tabs->tabBar()->hide(); layout->addWidget(tabs, 1);
+        auto *tabs = new MobileSourceTabs(); tabs->tabBar()->hide(); layout->addWidget(tabs); layout->setAlignment(Qt::AlignTop);
+        connect(tabs, &QTabWidget::currentChanged, &dialog, [tabs]{ tabs->updateGeometry(); });
         connect(sourcePicker, qOverload<int>(&QComboBox::currentIndexChanged), tabs, &QTabWidget::setCurrentIndex);
         auto *githubTab = new QWidget(); auto *ghLayout = new QVBoxLayout(githubTab); auto *ghForm = new QFormLayout();
         auto *ghRepo = new QLineEdit(); ghRepo->setPlaceholderText("Paste a GitHub link or owner/repository"); auto *fetchReleases = new QPushButton("Find latest release");
