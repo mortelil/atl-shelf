@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QClipboard>
 #include <QTest>
 #include <QTemporaryDir>
 #include <QDir>
@@ -160,6 +161,67 @@ private slots:
             QGuiApplication::inputMethod()->hide();
         });
         button(w.get(),"＋  Add app")->click();
+    }
+    void longAppNameStaysInsidePhoneWidth() {
+        const QString title="Signal-"+QString(240,'x')+"-universal-release";
+        const QString root=dataRoot+"/ATL Shelf/atl-shelf";
+        put(root+"/apps.json",QJsonDocument(QJsonArray{QJsonObject{{"id","immich"},{"name",title},{"source","local"}}}).toJson());
+        std::unique_ptr<QWidget> w(createShelfForTests()); w->resize(360,740); w->show(); QTest::qWait(80);
+        QCOMPARE(w->width(),360);
+        auto *list=w->findChild<QListWidget *>("library");
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,list->visualItemRect(list->item(0)).center());
+        QTest::qWait(50); QCOMPARE(w->width(),360);
+        auto *name=w->findChild<QLineEdit *>("appTitle"); QVERIFY(name); QCOMPARE(name->text(),title);
+        QVERIFY(name->width()<360); name->setCursorPosition(title.size()); QCOMPARE(name->cursorPosition(),title.size());
+        for(auto *scroll : w->findChildren<QScrollArea *>()) if(scroll->isVisible()) QCOMPARE(scroll->horizontalScrollBar()->maximum(),0);
+        button(w.get(),"App settings ▾")->click(); QTest::qWait(50); QCOMPARE(w->width(),360);
+        for(auto *scroll : w->findChildren<QScrollArea *>()) if(scroll->isVisible()) QCOMPARE(scroll->horizontalScrollBar()->maximum(),0);
+        button(w.get(),"‹ Back")->click();
+        QTimer::singleShot(50,[&] {
+            auto *page=qobject_cast<QDialog *>(currentPageForTests()); QVERIFY(page); const auto close=qScopeGuard([page]{page->reject();});
+            page->findChild<QComboBox *>("sourcePicker")->setCurrentIndex(3);
+            const QString filename="Signal-"+QString(160,'x')+"-universal-release.apk";
+            put(dataRoot+"/"+filename,"test APK path");
+            QTimer::singleShot(30,[&] {
+                auto *picker=qobject_cast<QDialog *>(currentPageForTests()); QVERIFY(picker);
+                picker->findChild<QLineEdit *>("fileNameEdit")->setText(dataRoot+"/"+filename);
+                button(picker,"Choose file")->click();
+            });
+            button(page,"Choose APK…")->click();
+            QCOMPARE(page->findChild<QLineEdit *>("installName")->text(),QFileInfo(filename).completeBaseName());
+            page->findChild<QLineEdit *>("installName")->setText(title);
+            QTest::qWait(50); QCOMPARE(w->width(),360);
+            for(auto *scroll : page->findChildren<QScrollArea *>()) QCOMPARE(scroll->horizontalScrollBar()->maximum(),0);
+        });
+        button(w.get(),"＋  Add app")->click();
+    }
+    void logTouchScrollAndDoubleTapSelection() {
+        QString contents; for(int i=0;i<500;++i) contents += QString("line %1: diagnostic details for testing touch scrolling\n").arg(i);
+        put(dataRoot+"/ATL Shelf/atl-shelf/apps/immich/launch.log",contents.toUtf8());
+        std::unique_ptr<QWidget> w(createShelfForTests()); w->resize(408,794); w->show(); QTest::qWait(60);
+        auto *list=w->findChild<QListWidget *>("library");
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,list->visualItemRect(list->item(0)).center());
+        QTimer::singleShot(50,[&] {
+            auto *page=qobject_cast<QDialog *>(currentPageForTests()); QVERIFY(page); const auto close=qScopeGuard([page]{page->reject();});
+            auto *log=page->findChild<QPlainTextEdit *>("launchLog"); QVERIFY(log);
+            QVERIFY(page->findChildren<QScrollArea *>().isEmpty());
+            auto *viewport=log->viewport(); static auto *device=QTest::createTouchDevice();
+            QTest::touchEvent(viewport,device).press(0,QPoint(100,250),viewport); QTest::qWait(30);
+            QTest::touchEvent(viewport,device).move(0,QPoint(100,180),viewport); QTest::qWait(30);
+            QTest::touchEvent(viewport,device).move(0,QPoint(100,50),viewport); QTest::qWait(30);
+            QTest::touchEvent(viewport,device).release(0,QPoint(100,50),viewport);
+            QTRY_VERIFY(log->verticalScrollBar()->value()>0);
+            QVERIFY(!log->textCursor().hasSelection());
+            QScroller::scroller(viewport)->stop(); log->verticalScrollBar()->setValue(0); QTest::qWait(80);
+            for(int i=0;i<2;++i) {
+                QTest::touchEvent(viewport,device).press(0,QPoint(18,10),viewport); QTest::qWait(20);
+                QTest::touchEvent(viewport,device).release(0,QPoint(18,10),viewport); QTest::qWait(30);
+            }
+            QVERIFY(log->textCursor().hasSelection());
+            QVERIFY(button(page,"Copy selection")->isEnabled());
+            button(page,"Copy log")->click(); QCOMPARE(QApplication::clipboard()->text(),contents);
+        });
+        button(w.get(),"View launch log")->click();
     }
     void cancelNetworkTransfer() {
         QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));

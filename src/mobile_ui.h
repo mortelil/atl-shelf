@@ -1,6 +1,9 @@
 #pragma once
 #include <QAbstractScrollArea>
 #include <QApplication>
+#include <QPlainTextEdit>
+#include <QMouseEvent>
+#include <QTextCursor>
 #include <QInputMethod>
 #include <QTabWidget>
 #include <QTabBar>
@@ -100,6 +103,13 @@ inline bool allowListActivation(QListWidget *list) {
     return QScroller::scroller(viewport)->state() == QScroller::Inactive && viewport->property("shelfScrollUntil").toLongLong() < QDateTime::currentMSecsSinceEpoch();
 }
 inline void enableTouchScrolling(QWidget *root) {
+    for (auto *label : root->findChildren<QLabel *>()) {
+        if (!label->wordWrap()) continue;
+        label->setMinimumWidth(0); auto policy=label->sizePolicy(); policy.setHorizontalPolicy(QSizePolicy::Ignored); label->setSizePolicy(policy);
+    }
+    for (auto *edit : root->findChildren<QLineEdit *>()) {
+        edit->setMinimumWidth(0); auto policy=edit->sizePolicy(); policy.setHorizontalPolicy(QSizePolicy::Ignored); edit->setSizePolicy(policy);
+    }
     for (auto *button : root->findChildren<QPushButton *>()) button->setFocusPolicy(Qt::TabFocus);
     const auto areas = root->findChildren<QAbstractScrollArea *>();
     for (auto *area : areas) {
@@ -128,10 +138,68 @@ inline void enableTouchScrolling(QWidget *root) {
     }
 }
 
+// A log is a reading surface: a drag pans, a double tap selects a word.
+// Feed touch directly to the scroller so QTextEdit never starts a drag selection.
+class MobileLogView : public QPlainTextEdit {
+    QPointF pressPosition, lastTapPosition;
+    qint64 lastTap = 0;
+    bool dragging = false;
+    void selectWord(const QPoint &position) {
+        auto cursor=cursorForPosition(position); cursor.select(QTextCursor::WordUnderCursor); setTextCursor(cursor);
+    }
+protected:
+    bool viewportEvent(QEvent *event) override {
+        if (event->type()==QEvent::TouchBegin || event->type()==QEvent::TouchUpdate || event->type()==QEvent::TouchEnd) {
+            auto *touch=static_cast<QTouchEvent *>(event);
+            if (touch->points().isEmpty()) return true;
+            const auto position=touch->points().first().position(); auto *scroller=QScroller::scroller(viewport());
+            if (event->type()==QEvent::TouchBegin) {
+                dragging=scroller->state()==QScroller::Scrolling; pressPosition=position;
+                scroller->handleInput(QScroller::InputPress,position,touch->timestamp());
+            } else if (event->type()==QEvent::TouchUpdate) {
+                dragging |= (position-pressPosition).manhattanLength()>QApplication::startDragDistance();
+                scroller->handleInput(QScroller::InputMove,position,touch->timestamp());
+            } else {
+                scroller->handleInput(QScroller::InputRelease,position,touch->timestamp());
+                const qint64 now=QDateTime::currentMSecsSinceEpoch();
+                if (!dragging && now-lastTap<QApplication::doubleClickInterval() && (position-lastTapPosition).manhattanLength()<QApplication::startDragDistance()) {
+                    selectWord(position.toPoint()); lastTap=0;
+                } else { lastTap=dragging ? 0 : now; lastTapPosition=position; }
+            }
+            event->accept(); return true;
+        }
+        if (event->type()==QEvent::TouchCancel) { QScroller::scroller(viewport())->stop(); lastTap=0; event->accept(); return true; }
+        return QPlainTextEdit::viewportEvent(event);
+    }
+    void mousePressEvent(QMouseEvent *event) override {
+        if(event->button()==Qt::LeftButton) { event->accept(); return; } QPlainTextEdit::mousePressEvent(event);
+    }
+    void mouseMoveEvent(QMouseEvent *event) override {
+        if(event->buttons() & Qt::LeftButton) { event->accept(); return; } QPlainTextEdit::mouseMoveEvent(event);
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if(event->button()==Qt::LeftButton) { event->accept(); return; } QPlainTextEdit::mouseReleaseEvent(event);
+    }
+    void mouseDoubleClickEvent(QMouseEvent *event) override {
+        if(event->button()==Qt::LeftButton) { selectWord(event->position().toPoint()); event->accept(); return; } QPlainTextEdit::mouseDoubleClickEvent(event);
+    }
+public:
+    explicit MobileLogView(QWidget *parent=nullptr) : QPlainTextEdit(parent) {
+        setReadOnly(true); setObjectName("launchLog"); setTextInteractionFlags(Qt::TextSelectableByKeyboard);
+        setLineWrapMode(QPlainTextEdit::WidgetWidth); setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); setMinimumWidth(0); setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Expanding);
+        setProperty("shelfTouchReady",true); viewport()->setAttribute(Qt::WA_AcceptTouchEvents);
+        auto *scroller=QScroller::scroller(viewport()); auto properties=scroller->scrollerProperties();
+        properties.setScrollMetric(QScrollerProperties::HorizontalOvershootPolicy,QScrollerProperties::OvershootAlwaysOff);
+        properties.setScrollMetric(QScrollerProperties::VerticalOvershootPolicy,QScrollerProperties::OvershootAlwaysOff);
+        scroller->setScrollerProperties(properties);
+    }
+};
+
 // Dialog-style operations are pages inside Shelf's sole native window.
 class MobileDialog : public QDialog {
     QPointer<QWidget> previous;
-    bool mounted = false, changing = false, prepared = false;
+    bool mounted = false, changing = false, prepared = false, scrollBody = true;
     QPushButton *back = nullptr;
     QString backText = "Cancel";
     void prepare() {
@@ -150,7 +218,9 @@ class MobileDialog : public QDialog {
         auto *row = new QHBoxLayout; back = new QPushButton(backText); back->setObjectName("pageBack"); back->setFixedWidth(80); row->addWidget(back);
         auto *title = new QLabel(windowTitle()); title->setWordWrap(true); title->setStyleSheet("font-size: 20px; font-weight: 600;"); row->addWidget(title, 1); outer->addLayout(row);
         QObject::connect(back, &QPushButton::clicked, this, [this]{ reject(); });
-        auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(body); outer->addWidget(scroll, 1);
+        if (scrollBody) {
+            auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(body); outer->addWidget(scroll, 1);
+        } else outer->addWidget(body,1);
         enableTouchScrolling(this);
     }
     void detach() {
@@ -166,6 +236,7 @@ protected:
 public:
     explicit MobileDialog(QWidget *parent = nullptr) : QDialog(parent) { setWindowFlags(Qt::Widget); }
     ~MobileDialog() override { detach(); }
+    void setBodyScrollable(bool enabled) { if (!prepared) scrollBody=enabled; }
     void setBackText(const QString &text) { backText = text; if (back) back->setText(text); }
     void setVisible(bool visible) override {
         if (changing || mobileTransition) { QDialog::setVisible(visible); return; }

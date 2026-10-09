@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QClipboard>
 #include <QScreen>
 #include <QIntValidator>
 #include <QPointer>
@@ -690,7 +691,7 @@ public:
         auto *detailScroll = new QScrollArea(); detailScroll->setWidgetResizable(true); detailScroll->setFrameShape(QFrame::NoFrame);
         auto *detailPage = new QWidget(); auto *detailLayout = new QVBoxLayout(detailPage); detailLayout->setContentsMargins(0, 4, 2, 4); detailLayout->setSpacing(12);
         auto *back = new QPushButton("‹  Back to apps"); back->setFlat(true); back->setStyleSheet("text-align: left; padding-left: 0;"); back->hide();
-        selectedTitle = new QLabel("App"); selectedTitle->setStyleSheet("font-size: 21px; font-weight: 650;"); detailLayout->addWidget(selectedTitle);
+        selectedTitle = new QLineEdit("App"); selectedTitle->setObjectName("appTitle"); selectedTitle->setReadOnly(true); selectedTitle->setFrame(false); selectedTitle->setStyleSheet("font-size: 21px; font-weight: 650;"); detailLayout->addWidget(selectedTitle);
         sourceLabel = new QLabel(); sourceLabel->setWordWrap(true); sourceLabel->setStyleSheet("color: palette(text);"); detailLayout->addWidget(sourceLabel);
         auto *open = new QPushButton("Open app"); open->setProperty("primary", true);
         connect(open, &QPushButton::clicked, this, [this]{ launchSelected(); });
@@ -789,7 +790,7 @@ private:
         writeApps(installed);
     }
     QLabel *welcome; QPushButton *prepareButton; QLineEdit *librarySearch;
-    QLineEdit *atlPath, *name, *activity, *width, *height, *workingDirectory; QPlainTextEdit *launchEnvironment; QListWidget *appsList; QLabel *status, *selectedTitle, *sourceLabel, *runtimeStatus; QCheckBox *dailyCheck, *fitScreen; QPushButton *checkButton; QStackedWidget *pages; QJsonArray apps;
+    QLineEdit *atlPath, *name, *activity, *width, *height, *workingDirectory; QPlainTextEdit *launchEnvironment; QListWidget *appsList; QLineEdit *selectedTitle; QLabel *status, *sourceLabel, *runtimeStatus; QCheckBox *dailyCheck, *fitScreen; QPushButton *checkButton; QStackedWidget *pages; QJsonArray apps;
     void loadLatestForAction() {
         const QString id = selectedRow >= 0 && selectedRow < apps.size() ? apps[selectedRow].toObject().value("id").toString() : QString();
         apps = readApps(); selectedRow = -1;
@@ -803,11 +804,19 @@ private:
     void showLaunchLog() {
         const int row = selected(); if (row < 0 || row >= apps.size()) return;
         MobileDialog dialog(this); dialog.setWindowTitle("Launch details"); dialog.setBackText("‹ Back"); fitDialog(dialog);
-        auto *layout = new QVBoxLayout(&dialog); auto *text = new QPlainTextEdit(); text->setReadOnly(true);
+        dialog.setBodyScrollable(false);
+        auto *layout = new QVBoxLayout(&dialog); auto *text = new MobileLogView();
         QFile log(appDir(apps[row].toObject()) + "/launch.log");
         if (log.open(QIODevice::ReadOnly)) { if (log.size() > 60000) log.seek(log.size() - 60000); text->setPlainText(QString::fromUtf8(log.readAll())); }
         else text->setPlainText("No launch log yet. Open the app from Shelf first.");
-        layout->addWidget(text); auto *close = new QPushButton("Close"); layout->addWidget(close); connect(close, &QPushButton::clicked, &dialog, &QDialog::accept); dialog.exec();
+        auto *hint=new QLabel("Drag to scroll. Double-tap a word to select it."); hint->setWordWrap(true); layout->addWidget(hint);
+        layout->addWidget(text,1);
+        auto *actions=new QHBoxLayout; auto *copySelection=new QPushButton("Copy selection"); auto *copyLog=new QPushButton("Copy log"); copySelection->setEnabled(false);
+        actions->addWidget(copySelection); actions->addWidget(copyLog); layout->addLayout(actions);
+        connect(text,&QPlainTextEdit::copyAvailable,copySelection,&QPushButton::setEnabled);
+        connect(copySelection,&QPushButton::clicked,text,&QPlainTextEdit::copy);
+        connect(copyLog,&QPushButton::clicked,text,[text]{ QApplication::clipboard()->setText(text->toPlainText()); });
+        dialog.exec();
     }
     void updateApps() {
         if (apps.isEmpty()) { addApp(); return; }
@@ -1056,7 +1065,7 @@ private:
         if (row < 0 || row >= apps.size()) return;
         selectedRow = row; appsList->setCurrentRow(row);
         const QJsonObject o = apps[row].toObject();
-        selectedTitle->setText(o.value("name").toString()); name->setText(o.value("name").toString());
+        selectedTitle->setText(o.value("name").toString()); selectedTitle->setCursorPosition(0); name->setText(o.value("name").toString());
         const QString source = o.value("source").toString("local");
         sourceLabel->setText(source == "github" ? "GitHub · " + o.value("github").toString() : source == "fdroid" ? "F-Droid · " + o.value("packageId").toString() : source == "apkmirror" ? "APKMirror · manual · " + o.value("sourceUrl").toString() : "Local APK");
         fitScreen->setChecked(o.value("fitScreen").toBool(true)); width->setEnabled(!fitScreen->isChecked()); height->setEnabled(!fitScreen->isChecked());
@@ -1097,7 +1106,7 @@ private:
             o["daily"] = false; o["updateError"] = why; dailyCheck->setChecked(false); status->setText("Settings saved. Automatic updates could not be enabled.\n" + why);
         } else { o.remove("updateError"); status->setText("Settings saved."); }
         apps[row] = o; writeApps(apps);
-        selectedTitle->setText(o.value("name").toString()); reload();
+        selectedTitle->setText(o.value("name").toString()); selectedTitle->setCursorPosition(0); reload();
     }
     void launchSelected() {
         int row = selected(); if (row < 0 || row >= apps.size()) return;
