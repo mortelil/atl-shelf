@@ -25,6 +25,8 @@ class RuntimeUpdateTest(unittest.TestCase):
         self.root = base / 'runtime'
         self.workspace = self.root / 'workspace'
         self.workspace.mkdir(parents=True)
+        (self.root / 'downloads').mkdir()
+        (self.root / 'downloads/r8-8.3.37.jar').write_text('fixture; no network')
         self.remotes = {}
         pins = {}
         for repo in reversed(REPOS):
@@ -45,6 +47,9 @@ mkdir -p "$ATL_BUILD_DIR"
 printf '#!/bin/sh\\nexit 0\\n' > "$ATL_BUILD_DIR/android-translation-layer"
 chmod +x "$ATL_BUILD_DIR/android-translation-layer"
 ''')
+                (mobile / 'build-art-runtime.sh').write_text('#!/bin/sh\nset -eu\nmkdir -p "$ATL_PREFIX/lib"\nprintf art > "$ATL_PREFIX/lib/libart.so"\nprintf compiler > "$ATL_PREFIX/lib/libart-compiler.so"\n')
+                (mobile / 'build-core-java.sh').write_text('#!/bin/sh\nset -eu\ntest -s "$R8_JAR"\ntest ! -f "$(dirname "$ATL_WORKSPACE")/fail-core"\nmkdir -p "$ATL_PREFIX/share/art"\nprintf core > "$ATL_PREFIX/share/art/core-all-hostdex.jar"\n')
+                (mobile / 'build-apk-verifier.sh').write_text('#!/bin/sh\nset -eu\nmkdir -p "$ATL_PREFIX/libexec/atl-apk-verifier"\nprintf \'#!/bin/sh\\nexit 0\\n\' > "$ATL_PREFIX/libexec/atl-apk-verifier/run"\nchmod +x "$ATL_PREFIX/libexec/atl-apk-verifier/run"\n')
                 (remote / '.gitignore').write_text('build-mobile/\n')
                 generated = remote / 'src/api-impl/com/android/internal'
                 generated.mkdir(parents=True)
@@ -79,6 +84,28 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
         (self.workspace / 'android_translation_layer/source').write_text('user edit')
         self.run_update(ok=False)
         self.assertEqual((self.workspace / 'android_translation_layer/source').read_text(), 'user edit')
+
+    def test_missing_runtime_artifact_rebuilds_and_failed_core_is_not_published(self):
+        self.run_update()
+        core = self.root / 'prefix/share/art/core-all-hostdex.jar'
+        core.unlink()
+        (self.root / 'fail-core').touch()
+        self.run_update(ok=False)
+        self.assertFalse(core.exists())
+        (self.root / 'fail-core').unlink()
+        self.run_update()
+        self.assertTrue(core.exists())
+        self.assertIn('No compilation needed', self.run_update())
+        self.assertEqual(len((self.root / 'build-count').read_text().splitlines()), 3)
+
+    def test_old_recipe_metadata_does_not_skip_runtime_upgrade(self):
+        self.run_update()
+        metadata = self.root / 'built-revisions'
+        # Old Shelf stored only the source revisions (and optional display patch).
+        metadata.write_text('\n'.join(metadata.read_text().splitlines()[:-1]) + '\n')
+        self.assertNotIn('No compilation needed', self.run_update())
+        self.assertIn('No compilation needed', self.run_update())
+        self.assertEqual(len((self.root / 'build-count').read_text().splitlines()), 2)
 
     def test_existing_checkout_after_branch_rename(self):
         for repo in REPOS:

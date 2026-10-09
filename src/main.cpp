@@ -105,6 +105,14 @@ static QJsonObject readSettings() {
         env["ATL_WORKSPACE"] = root + "/workspace";
         env["ATL_PREFIX"] = root + "/prefix";
         env["ATL_BUILD_DIR"] = root + "/workspace/android_translation_layer/build-mobile";
+        // Select the same complete runtime for GUI and CLI launches. Older
+        // installations keep working until runtime update creates these files.
+        const QString core = root + "/prefix/share/art/core-all-hostdex.jar";
+        const QString verifier = root + "/prefix/libexec/atl-apk-verifier/run";
+        if (QFileInfo::exists(core) && !env.contains("ATL_CORE_JAR")) env["ATL_CORE_JAR"] = core;
+        if (QFileInfo(verifier).isExecutable() && !env.contains("ATL_APK_VERIFIER")) env["ATL_APK_VERIFIER"] = verifier;
+        if (QFileInfo::exists(root + "/prefix/lib/libart.so") && !env.contains("LD_PRELOAD"))
+            env["LD_PRELOAD"] = "/usr/lib/libjemalloc.so.2";
         settings["runtimeEnv"] = env;
     }
     QJsonObject env = settings.value("runtimeEnv").toObject(); env["ATL_RENDER_SCALE"] = QString::number(currentDisplay().scale); settings["runtimeEnv"] = env;
@@ -969,7 +977,7 @@ private:
             QStringList apkPackages;
             if (mode == "apk") apkPackages = {"android-translation-layer", "bionic_translation", "art_standalone"};
             else {
-                apkPackages = {"git", "build-base", "meson", "python3", "pkgconf", "java-common", "openjdk8-jdk", "android-build-tools", "elfutils-dev", "libunwind-dev", "libbsd-dev", "libcap-dev", "pc:alsa", "pc:glib-2.0", "pc:gtk4", "pc:gudev-1.0", "pc:libportal", "pc:openxr", "pc:vulkan", "pc:webkitgtk-6.0", "pc:libsecret-1", "ffmpeg-dev", "bionic_translation-dev", "art_standalone-dev", "libandroidfw-dev"};
+                apkPackages = {"git", "build-base", "meson", "python3", "pkgconf", "java-common", "openjdk8-jdk", "openjdk21-jdk", "curl", "jemalloc", "android-build-tools", "elfutils-dev", "libunwind-dev", "libbsd-dev", "libcap-dev", "pc:alsa", "pc:glib-2.0", "pc:gtk4", "pc:gudev-1.0", "pc:libportal", "pc:openxr", "pc:vulkan", "pc:webkitgtk-6.0", "pc:libsecret-1", "ffmpeg-dev", "bionic_translation-dev", "art_standalone-dev", "libandroidfw-dev"};
                 if (mode == "gitlab") apkPackages << "wolfssl-dev";
             }
             apkPackages << "android-build-tools" << "unzip" << "qt6-qtsvg";

@@ -248,7 +248,7 @@ static int shelfCli(QStringList arguments) {
             if(options.value("--binary").isEmpty() || !QFileInfo(binary).isExecutable() || !QFileInfo(launcher).isExecutable()) return reply(false,{},"--binary and launcher must be executable files.",2);
         } else {
             if(options.contains("--install-deps") || mode=="apk") {
-                QStringList packages=mode=="apk" ? QStringList{"android-translation-layer","bionic_translation","art_standalone"} : QStringList{"git","build-base","meson","python3","pkgconf","java-common","openjdk8-jdk","android-build-tools","elfutils-dev","libunwind-dev","libbsd-dev","libcap-dev","pc:alsa","pc:glib-2.0","pc:gtk4","pc:gudev-1.0","pc:libportal","pc:openxr","pc:vulkan","pc:webkitgtk-6.0","pc:libsecret-1","ffmpeg-dev","bionic_translation-dev","art_standalone-dev","libandroidfw-dev"};
+                QStringList packages=mode=="apk" ? QStringList{"android-translation-layer","bionic_translation","art_standalone"} : QStringList{"git","build-base","meson","python3","pkgconf","java-common","openjdk8-jdk","openjdk21-jdk","curl","jemalloc","android-build-tools","elfutils-dev","libunwind-dev","libbsd-dev","libcap-dev","pc:alsa","pc:glib-2.0","pc:gtk4","pc:gudev-1.0","pc:libportal","pc:openxr","pc:vulkan","pc:webkitgtk-6.0","pc:libsecret-1","ffmpeg-dev","bionic_translation-dev","art_standalone-dev","libandroidfw-dev"};
                 if(mode=="gitlab") packages<<"wolfssl-dev";
                 packages<<"android-build-tools"<<"unzip"<<"qt6-qtsvg"; packages.removeDuplicates();
                 const auto apk=QStandardPaths::findExecutable("apk"); if(apk.isEmpty()) return reply(false,{},"Alpine apk was not found.");

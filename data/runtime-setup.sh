@@ -100,14 +100,34 @@ if [ "$mode" = github ] && [ -s "$patch_file" ]; then
     fi
     sha256sum "$patch_file" | cut -d ' ' -f 1 >> "$root/.build-lock/revisions"
 fi
-if [ "$action" = update ] && [ -x "$build/android-translation-layer" ] && cmp -s "$root/.build-lock/revisions" "$root/built-revisions"; then
+# A setup recipe change must rebuild even when the three Git revisions match.
+sha256sum "$0" | cut -d ' ' -f 1 >> "$root/.build-lock/revisions"
+runtime_ready=true
+if [ "$mode" = github ]; then
+    for artifact in "$prefix/lib/libart.so" "$prefix/lib/libart-compiler.so" "$prefix/share/art/core-all-hostdex.jar" "$prefix/libexec/atl-apk-verifier/run"; do
+        [ -s "$artifact" ] || runtime_ready=false
+    done
+fi
+if [ "$action" = update ] && [ "$runtime_ready" = true ] && [ -x "$build/android-translation-layer" ] && cmp -s "$root/.build-lock/revisions" "$root/built-revisions"; then
     echo "ATL is already up to date. No compilation needed."
     exit 0
 fi
 echo "Building runtime…"
 if [ "$mode" = github ]; then
-	ATL_WORKSPACE="$workspace" ATL_PREFIX="$prefix" ATL_BUILD_DIR="$build" JOBS="$jobs" \
-		sh "$workspace/android_translation_layer/scripts/mobile/build.sh"
+    export ATL_WORKSPACE="$workspace" ATL_PREFIX="$prefix" ATL_BUILD_DIR="$build" JOBS="$jobs"
+    mobile="$workspace/android_translation_layer/scripts/mobile"
+    sh "$mobile/build.sh"
+    sh "$mobile/build-art-runtime.sh"
+    mkdir -p "$root/downloads"
+    r8="$root/downloads/r8-8.3.37.jar"
+    if [ ! -f "$r8" ]; then
+        curl -fL --connect-timeout 15 --max-time 300 \
+            https://storage.googleapis.com/r8-releases/raw/8.3.37/r8.jar -o "$r8.part"
+        mv "$r8.part" "$r8"
+    fi
+    # ATL validates the pinned R8 and apksig checksums before use.
+    R8_JAR="$r8" sh "$mobile/build-core-java.sh"
+    sh "$mobile/build-apk-verifier.sh"
 	elif [ "$mode" = gitlab ]; then
 	bionic="$workspace/bionic_translation"
 	art="$workspace/art_standalone"

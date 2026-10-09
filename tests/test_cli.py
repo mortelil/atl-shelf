@@ -57,6 +57,30 @@ class CliTest(unittest.TestCase):
     def install(self, id='sample', *extra):
         return self.call('install', '--source', 'local', '--value', str(self.apk), '--id', id, *extra)[0]
 
+    def test_github_runtime_artifacts_supply_environment_and_preserve_overrides(self):
+        self.install()
+        self.call('settings', '--set', '{"runtimeType":"github"}')
+        env = self.call('launch', 'sample', '--dry-run')[0]['environment']
+        self.assertNotIn('ATL_CORE_JAR', env)
+        prefix = self.base / 'data/atl-shelf/runtime/github/prefix'
+        for name in ('lib/libart.so', 'share/art/core-all-hostdex.jar', 'libexec/atl-apk-verifier/run'):
+            path = prefix / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture')
+            path.chmod(0o755)
+        env = self.call('launch', 'sample', '--dry-run')[0]['environment']
+        self.assertEqual(env['ATL_CORE_JAR'], str(prefix / 'share/art/core-all-hostdex.jar'))
+        self.assertEqual(env['ATL_APK_VERIFIER'], str(prefix / 'libexec/atl-apk-verifier/run'))
+        self.assertEqual(env['LD_PRELOAD'], '/usr/lib/libjemalloc.so.2')
+        self.call('settings', '--set', '{"runtimeEnv":{"ATL_CORE_JAR":"/custom/core.jar","LD_PRELOAD":"/custom/allocator.so"}}')
+        env = self.call('launch', 'sample', '--dry-run')[0]['environment']
+        self.assertEqual(env['ATL_CORE_JAR'], '/custom/core.jar')
+        self.assertEqual(env['LD_PRELOAD'], '/custom/allocator.so')
+        self.call('settings', '--set', '{"runtimeType":"existing","runtimeEnv":{"ATL_CORE_JAR":null,"LD_PRELOAD":null}}')
+        env = self.call('launch', 'sample', '--dry-run')[0]['environment']
+        self.assertNotIn('ATL_CORE_JAR', env)
+        self.assertNotIn('LD_PRELOAD', env)
+
     def test_clear_private_data_preserves_install_and_other_files(self):
         entry = self.install()
         root = Path(entry['dataDirectory'])

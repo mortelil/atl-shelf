@@ -114,3 +114,41 @@ Build output is saved under the runtime directory (`cli-runtime.log` or `cli-dep
 | 5 | Operation failed; inspect result for partial changes |
 | 6 | App/build/package subprocess failed; result contains its exit code |
 | 130 | Interrupted |
+
+### Complete GitHub runtime
+
+The GitHub setup builds ATL, the pinned Bionic/ART native runtime, D8-desugared
+core Java classes, and the optional APK signature verifier. It downloads pinned
+R8 and apksig JARs; ATL's build scripts verify their checksums. This requires
+OpenJDK 8 and 21, curl, and jemalloc in addition to the native build dependencies.
+Both GUI and CLI dependency installation include these packages.
+
+When those private runtime artifacts exist, GUI and CLI launches automatically
+select `ATL_CORE_JAR`, `ATL_APK_VERIFIER`, and the jemalloc preload. Explicit
+runtime environment overrides still take precedence. No paths into a developer's
+test directories are required, and system ART/boot JARs are not replaced.
+
+Run `atl-shelf cli runtime update --jobs 2` after upgrading Shelf. The update
+checks the build recipe as well as Git revisions, and rebuilds if required
+runtime artifacts are missing. This repairs older installations that reported
+ATL as up to date while still using packaged ART and core classes. A failed
+extra build step does not mark the runtime as successfully updated. Apps must
+be closed during the update; the build is still in-place, not transactional.
+
+A missing desugared core can surface in Plexamp as a
+`BootstrapMethodError` / `illegal lookupClass: java.util.stream.Collectors`.
+A mixed packaged/private native runtime also caused Messenger startup crashes
+in the tested Nura installation. Installing the latest ATL source alone does
+not repair these runtime selections. Use `launch ID --dry-run` to verify the
+managed core/verifier paths and allocator environment after updating Shelf.
+These fixes do not imply full application support: icon fonts, editable text
+sizing at high density, and physical keyboard integration need separate tests.
+
+Verified on Nura with a clean private native ART build: Messenger
+582.0.0.61.92 reaches login and opens its language chooser; Plexamp 4.50.19
+reaches sign-in after Continue. Both real native text widgets passed synthetic
+insert/delete, masking and retained-value checks without submitting credentials.
+These tests used process-local input/capture helpers, not physical keyboard
+input. Small editable text at high display density and missing Plexamp icon
+fonts remain visible limitations. The normal runtime paths do not reference
+those diagnostic helpers.
