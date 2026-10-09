@@ -1,0 +1,223 @@
+diff --git a/src/api-impl-jni/android_view_Window.c b/src/api-impl-jni/android_view_Window.c
+index 9c3b42d7..426c8f62 100644
+--- a/src/api-impl-jni/android_view_Window.c
++++ b/src/api-impl-jni/android_view_Window.c
+@@ -2,6 +2,7 @@
+ 
+ #include "defines.h"
+ #include "util.h"
++#include "android_view_Window.h"
+ 
+ #include "generated_headers/android_view_Window.h"
+ 
+@@ -73,27 +74,37 @@ static void atl_scale_root_class_init(ATLScaleRootClass *klass)
+ 
+ static void atl_scale_root_init(ATLScaleRoot *root) { root->scale = 1; }
+ 
++GtkWidget *atl_window_get_content(GtkWindow *window)
++{
++    GtkWidget *child = gtk_window_get_child(window);
++    if (child && G_TYPE_CHECK_INSTANCE_TYPE(child, atl_scale_root_get_type()))
++        return ((ATLScaleRoot *)child)->child;
++    return child;
++}
++
++void atl_window_set_content(JNIEnv *env, GtkWindow *window, GtkWidget *content)
++{
++    if (atl_window_get_content(window) == content)
++        return;
++    if (getenv("ATL_RENDER_SCALE")) {
++        jclass metrics = (*env)->FindClass(env, "android/util/DisplayMetrics");
++        double scale = (*env)->GetStaticIntField(env, metrics, _STATIC_FIELD_ID(metrics, "DENSITY_DEVICE", "I")) / 160.0;
++        (*env)->DeleteLocalRef(env, metrics);
++        ATLScaleRoot *root = g_object_new(atl_scale_root_get_type(), NULL);
++        root->scale = scale;
++        root->child = content;
++        gtk_widget_set_parent(content, GTK_WIDGET(root));
++        gtk_window_set_child(window, GTK_WIDGET(root));
++    } else {
++        gtk_window_set_child(window, content);
++    }
++    /* Also expose Android coordinates to libandroid's native input queue. */
++    g_object_set_data(G_OBJECT(window), "atl-content", content);
++}
++
+ JNIEXPORT void JNICALL Java_android_view_Window_set_1widget_1as_1root(JNIEnv *env, jobject this, jlong window, jlong widget)
+ {
+-	GtkWindow *gtk_window = GTK_WINDOW(_PTR(window));
+-	GtkWidget *gtk_widget = gtk_widget_get_parent(GTK_WIDGET(_PTR(widget)));
+-	if (getenv("ATL_RENDER_SCALE")) {
+-		jclass metrics = (*env)->FindClass(env, "android/util/DisplayMetrics");
+-		double scale = (*env)->GetStaticIntField(env, metrics, _STATIC_FIELD_ID(metrics, "DENSITY_DEVICE", "I")) / 160.0;
+-		(*env)->DeleteLocalRef(env, metrics);
+-		GtkWidget *existing = gtk_window_get_child(gtk_window);
+-		if (existing && G_TYPE_CHECK_INSTANCE_TYPE(existing, atl_scale_root_get_type()) && ((ATLScaleRoot *)existing)->child == gtk_widget)
+-			return;
+-		ATLScaleRoot *root = g_object_new(atl_scale_root_get_type(), NULL);
+-		root->scale = scale;
+-		root->child = gtk_widget;
+-		gtk_widget_set_parent(gtk_widget, GTK_WIDGET(root));
+-		gtk_window_set_child(gtk_window, GTK_WIDGET(root));
+-		return;
+-	}
+-	if (gtk_widget != gtk_window_get_child(gtk_window)) {
+-		gtk_window_set_child(gtk_window, gtk_widget);
+-	}
++    atl_window_set_content(env, GTK_WINDOW(_PTR(window)), gtk_widget_get_parent(GTK_WIDGET(_PTR(widget))));
+ }
+ 
+ JNIEXPORT void JNICALL Java_android_view_Window_set_1title(JNIEnv *env, jobject this, jlong window, jstring title_jstr)
+diff --git a/src/api-impl-jni/app/android_app_Activity.c b/src/api-impl-jni/app/android_app_Activity.c
+index a48c50a9..97538dcd 100644
+--- a/src/api-impl-jni/app/android_app_Activity.c
++++ b/src/api-impl-jni/app/android_app_Activity.c
+@@ -1,4 +1,5 @@
+ #include <gtk/gtk.h>
++#include "../android_view_Window.h"
+ #include <libportal/portal.h>
+ 
+ #include <jni.h>
+@@ -32,7 +33,7 @@ static void activity_close(JNIEnv *env, jobject activity)
+ 	}
+ 
+ 	GtkWidget *decor_view = get_decor_view(env, activity);
+-	GtkStack *stack = GTK_STACK(gtk_window_get_child(window));
++	GtkStack *stack = GTK_STACK(atl_window_get_content(window));
+ 	gtk_stack_remove(stack, decor_view);
+ 
+ 	/* -- run the activity's onDestroy -- */
+@@ -70,7 +71,7 @@ static void activity_focus(JNIEnv *env, jobject activity)
+ 		return;
+ 
+ 	GtkWidget *decor_view = get_decor_view(env, activity);
+-	GtkStack *stack = GTK_STACK(gtk_window_get_child(window));
++	GtkStack *stack = GTK_STACK(atl_window_get_content(window));
+ 	gtk_stack_set_visible_child(stack, decor_view);
+ 
+ 	(*env)->CallVoidMethod(env, activity, handle_cache.activity.onResume);
+@@ -196,7 +197,7 @@ void activity_start(JNIEnv *env, jobject activity_object)
+ 	activity_backlog = g_list_prepend(activity_backlog, _REF(activity_object));
+ 
+ 	GtkWidget *decor_view = get_decor_view(env, activity_object);
+-	GtkStack *stack = GTK_STACK(gtk_window_get_child(window));
++	GtkStack *stack = GTK_STACK(atl_window_get_content(window));
+ 	gtk_stack_add_child(stack, decor_view);
+ 
+ 	activity_update_current(env);
+diff --git a/src/api-impl-jni/app/android_app_Dialog.c b/src/api-impl-jni/app/android_app_Dialog.c
+index d2992ae8..20483b07 100644
+--- a/src/api-impl-jni/app/android_app_Dialog.c
++++ b/src/api-impl-jni/app/android_app_Dialog.c
+@@ -1,4 +1,5 @@
+ #include <gtk/gtk.h>
++#include "../android_view_Window.h"
+ #include <jni.h>
+ 
+ #include "../defines.h"
+@@ -58,7 +59,7 @@ JNIEXPORT jlong JNICALL Java_android_app_Dialog_nativeInit(JNIEnv *env, jobject
+ 	GtkWidget *decor_view = GTK_WIDGET(_PTR(decor_view_ptr));
+ 	GtkWidget *dialog = gtk_window_new();
+ 	gtk_window_set_transient_for(GTK_WINDOW(dialog), window);
+-	gtk_window_set_child(GTK_WINDOW(dialog), gtk_widget_get_parent(decor_view));
++	atl_window_set_content(env, GTK_WINDOW(dialog), gtk_widget_get_parent(decor_view));
+ 	g_signal_connect(GTK_WINDOW(dialog), "close-request", G_CALLBACK(on_close_request), _REF(this));
+ 	return _INTPTR(g_object_ref(dialog));
+ }
+@@ -76,7 +77,7 @@ JNIEXPORT void JNICALL Java_android_app_Dialog_nativeSetContentView(JNIEnv *env,
+ 	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
+ 	GtkWidget *widget = GTK_WIDGET(_PTR(widget_ptr));
+ 
+-	gtk_window_set_child(dialog, gtk_widget_get_parent(widget));
++	atl_window_set_content(env, dialog, gtk_widget_get_parent(widget));
+ }
+ 
+ JNIEXPORT void JNICALL Java_android_app_Dialog_nativeShow(JNIEnv *env, jobject this, jlong ptr)
+diff --git a/src/api-impl-jni/app/android_atl_ATLKeyboardDialog.c b/src/api-impl-jni/app/android_atl_ATLKeyboardDialog.c
+index dc2879b3..5aafd7bc 100644
+--- a/src/api-impl-jni/app/android_atl_ATLKeyboardDialog.c
++++ b/src/api-impl-jni/app/android_atl_ATLKeyboardDialog.c
+@@ -1,6 +1,7 @@
+ #include <gio/gio.h>
+ #include <glib.h>
+ #include <gtk/gtk.h>
++#include "../android_view_Window.h"
+ #include <gtk4-layer-shell/gtk4-layer-shell.h>
+ #include <jni.h>
+ 
+@@ -176,7 +177,7 @@ JNIEXPORT jlong JNICALL Java_android_atl_ATLKeyboardDialog_nativeInit(JNIEnv *en
+ 
+ 	connect_osk_dbus_iface(dialog);
+ 
+-	gtk_window_set_child(GTK_WINDOW(dialog), gtk_widget_get_parent(decor_view));
++	atl_window_set_content(env, GTK_WINDOW(dialog), gtk_widget_get_parent(decor_view));
+ 	g_signal_connect_swapped(dialog, "response", G_CALLBACK(gtk_window_destroy), dialog);
+ 	g_signal_connect(GTK_WINDOW(dialog), "close-request", G_CALLBACK(on_close_request), _REF(this));
+ 
+diff --git a/src/api-impl-jni/views/android_view_WindowManagerImpl.c b/src/api-impl-jni/views/android_view_WindowManagerImpl.c
+index 560084b0..15fe0769 100644
+--- a/src/api-impl-jni/views/android_view_WindowManagerImpl.c
++++ b/src/api-impl-jni/views/android_view_WindowManagerImpl.c
+@@ -1,4 +1,5 @@
+ #include <gtk/gtk.h>
++#include "../android_view_Window.h"
+ 
+ #include "../defines.h"
+ #include "../generated_headers/android_view_WindowManagerImpl.h"
+@@ -22,7 +23,7 @@ JNIEXPORT void JNICALL Java_android_view_WindowManagerImpl_native_1addView(JNIEn
+ 	printf("::: x=%d, y=%d, width=%d, height=%d\n", x, y, width, height);
+ 	gtk_popover_set_autohide(popover, FALSE);
+ 	gtk_popover_set_pointing_to(popover, &(GdkRectangle){.x = x, .y = y});
+-	GtkStack *stack = GTK_STACK(gtk_window_get_child(window));
++	GtkStack *stack = GTK_STACK(atl_window_get_content(window));
+ 	GtkWidget *decor_view = gtk_stack_get_visible_child(stack);
+ 	gtk_widget_insert_before(GTK_WIDGET(popover), decor_view, NULL);
+ 	gtk_popover_present(popover);
+diff --git a/src/libandroid/input.c b/src/libandroid/input.c
+index 269018c8..8d543919 100644
+--- a/src/libandroid/input.c
++++ b/src/libandroid/input.c
+@@ -174,7 +174,9 @@ static inline void make_touch_event(GdkEvent *event, GtkEventControllerLegacy *e
+ 	// apps expect it to start at the top left of the area where child widgets get placed, so that
+ 	// the top left of the window is the same as the top left of a single widget filling the entire window
+ 	// while it's quite hacky, the following should realistically work for most if not all cases
+-	if ((child = gtk_window_get_child(GTK_WINDOW(window)))) {
++	child = g_object_get_data(G_OBJECT(window), "atl-content");
++	if (!child) child = gtk_window_get_child(GTK_WINDOW(window));
++	if (child) {
+ 		int ret;
+ 		graphene_point_t p;
+ 		ret = gtk_widget_compute_point(window, child, &GRAPHENE_POINT_INIT(ainput_event->x, ainput_event->y), &p);
+diff --git a/src/main-executable/main.c b/src/main-executable/main.c
+index e6d92a73..7f37eb6d 100644
+--- a/src/main-executable/main.c
++++ b/src/main-executable/main.c
+@@ -8,6 +8,7 @@
+ 
+ #include "../api-impl-jni/defines.h"
+ #include "../api-impl-jni/util.h"
++#include "../api-impl-jni/android_view_Window.h"
+ #include "../api-impl-jni/app/android_app_Activity.h"
+ #include "../api-impl-jni/content/android_content_Context.h"
+ 
+@@ -479,7 +480,7 @@ static void open(GtkApplication *app, GFile **files, gint nfiles, const gchar *h
+ 	window = gtk_application_window_new(app);
+ 	GtkWidget *stack = gtk_stack_new();
+ 	gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT_RIGHT);
+-	gtk_window_set_child(GTK_WINDOW(window), stack);
++	atl_window_set_content(env, GTK_WINDOW(window), stack);
+ 
+ 	const char *disable_decoration_env = getenv("ATL_DISABLE_WINDOW_DECORATIONS");
+ 	gboolean decorated;
+diff --git a/src/api-impl-jni/android_view_Window.h b/src/api-impl-jni/android_view_Window.h
+new file mode 100644
+index 00000000..9992ca53
+--- /dev/null
++++ b/src/api-impl-jni/android_view_Window.h
+@@ -0,0 +1,7 @@
++#pragma once
++#include <gtk/gtk.h>
++#include <jni.h>
++
++/* Android content uses density-scaled pixels; GTK windows use logical pixels. */
++void atl_window_set_content(JNIEnv *env, GtkWindow *window, GtkWidget *content);
++GtkWidget *atl_window_get_content(GtkWindow *window);

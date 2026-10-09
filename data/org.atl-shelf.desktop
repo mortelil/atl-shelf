@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ATL Shelf
+Comment=Manage Android apps running through ATL
+Exec=atl-shelf
+Icon=org.atl-shelf
+Terminal=false
+Categories=Utility;
+StartupNotify=true

@@ -1,0 +1,9 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="fdroid-signing-key.asc">fdroid-signing-key.asc</file>
+    <file alias="org.atl-shelf.svg">org.atl-shelf.svg</file>
+    <file alias="org.atl-shelf.png">org.atl-shelf.png</file>
+    <file alias="atl-native-density.patch">atl-native-density.patch</file>
+    <file alias="runtime-setup.sh">runtime-setup.sh</file>
+  </qresource>
+</RCC>

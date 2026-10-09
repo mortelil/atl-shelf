@@ -1,0 +1,13 @@
+/build/
+/build-nura/
+/Makefile
+/.qmake.stash
+/main.o
+/main.moc
+/moc_predefs.h
+/atl-shelf
+
+*.o
+/qrc_*.cpp
+__pycache__/
+*.pyc

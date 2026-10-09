@@ -1,0 +1,17 @@
+name: Build and test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libqt6svg6
+      - name: Build
+        run: cmake -S . -B build -DATL_SHELF_TESTS=ON && cmake --build build -j2
+      - name: Interaction tests
+        run: QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
+      - name: Runtime update tests
+        run: python3 -m unittest discover -s tests -v
