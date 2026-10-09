@@ -57,6 +57,36 @@ class CliTest(unittest.TestCase):
     def install(self, id='sample', *extra):
         return self.call('install', '--source', 'local', '--value', str(self.apk), '--id', id, *extra)[0]
 
+    def test_clear_private_data_preserves_install_and_other_files(self):
+        entry = self.install()
+        root = Path(entry['dataDirectory'])
+        private = root / 'app.apk_'
+        private.mkdir()
+        (private / 'database').write_text('private')
+        cache = root / '.cache'
+        cache.mkdir()
+        (cache / 'cached').write_text('cache')
+        (root / 'launch.log').write_text('diagnostic')
+        library = (self.root / 'apps.json').read_bytes()
+        self.call('clear-data', 'sample', '--dry-run', code=2)
+        self.assertTrue(private.exists())
+        self.call('clear-data', 'sample')
+        self.assertFalse(private.exists())
+        self.assertFalse(cache.exists())
+        self.assertTrue(Path(entry['apkPath']).exists())
+        self.assertTrue((root / 'launch.log').exists())
+        self.assertEqual((self.root / 'apps.json').read_bytes(), library)
+        self.call('clear-data', 'sample')
+        outside = self.base / 'shared'
+        outside.mkdir()
+        (outside / 'keep').write_text('keep')
+        private.symlink_to(outside, target_is_directory=True)
+        self.call('clear-data', 'sample')
+        self.assertTrue((outside / 'keep').exists())
+        self.call('configure', 'sample', '--set', json.dumps({'launchEnv': {'ANDROID_APP_DATA_DIR': str(outside)}}))
+        self.call('clear-data', 'sample', code=5)
+        self.assertTrue((outside / 'keep').exists())
+
     def test_headless_lifecycle_and_physical_display(self):
         entry = self.install()
         self.assertEqual(entry['id'], 'sample')
@@ -143,6 +173,7 @@ class CliTest(unittest.TestCase):
         self.call('launch', 'sample', code=4)
         self.call('remove', 'sample', code=4)
         self.call('replace', 'sample', '--apk', str(self.apk), code=4)
+        self.call('clear-data', 'sample', code=5)
         self.call('stop', 'sample')
         self.assertEqual(self.call('show', 'sample')[0]['processes'], [])
 

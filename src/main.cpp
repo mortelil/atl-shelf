@@ -647,14 +647,14 @@ class Shelf : public QWidget {
 public:
     Shelf() {
         setWindowTitle("ATL Shelf"); fitDialog(*this, 520, 780); setMinimumSize(320, 400);
-        setStyleSheet("QPushButton { padding: 10px 14px; min-height: 24px; border: 1px solid palette(midlight); background: palette(button); border-radius: 8px; } QPushButton[primary=\"true\"] { background: #3859cf; color: white; border: none; font-weight: 600; } QLineEdit, QComboBox { padding: 7px; } QListWidget::item { padding: 11px; } QGroupBox { margin-top: 12px; font-weight: 600; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }");
+        setStyleSheet("QPushButton { padding: 10px 14px; min-height: 24px; border: 1px solid palette(midlight); background: palette(button); border-radius: 8px; } QPushButton[primary=\"true\"] { background: palette(highlight); color: palette(highlighted-text); border: none; font-weight: 600; } QLineEdit, QComboBox { padding: 7px; } QListWidget::item { padding: 11px; } QGroupBox { margin-top: 12px; font-weight: 600; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }");
         auto *rootLayout = new QVBoxLayout(this); rootLayout->setContentsMargins(0, 0, 0, 0);
         shell = new QStackedWidget(this); shell->setObjectName("mobileHost"); mobileHost = shell; rootLayout->addWidget(shell);
         mainPage = new QWidget; shell->addWidget(mainPage);
         auto *outer = new QVBoxLayout(mainPage); outer->setContentsMargins(18, 16, 18, 16); outer->setSpacing(12);
-        auto *heading = new QLabel("ATL Shelf"); heading->setStyleSheet("font-size: 20px; font-weight: 700;"); auto *top = new QHBoxLayout(); navBack = new QPushButton("‹ Back"); navBack->setObjectName("mainBack"); navBack->setFixedWidth(100); top->addWidget(navBack); top->addWidget(heading); top->addStretch();
+        auto *heading = new QLabel("ATL Shelf"); heading->setStyleSheet("font-size: 20px; font-weight: 700;"); auto *top = new QHBoxLayout(); navBack = new QPushButton("‹ Back"); navBack->setObjectName("mainBack"); navBack->setFixedWidth(80); top->addWidget(navBack); heading->setMinimumWidth(0); top->addWidget(heading, 1); top->addStretch();
         auto *settingsButton = new QPushButton("Settings"); top->addWidget(settingsButton); outer->addLayout(top);
-        auto *subtitle = new QLabel("Android apps on your Linux phone."); subtitle->setStyleSheet("color: palette(text); margin-top: -8px;"); outer->addWidget(subtitle);
+        auto *subtitle = new QLabel("Android apps on your Linux phone."); subtitle->setObjectName("librarySubtitle"); subtitle->setWordWrap(true); outer->addWidget(subtitle);
 
         auto *settings = new QGroupBox("Android runtime"); auto *settingsLayout = new QVBoxLayout(settings);
         auto *runtimeRow = new QHBoxLayout(); atlPath = new QLineEdit(); atlPath->setReadOnly(true); atlPath->setPlaceholderText("Runtime not set up yet");
@@ -668,19 +668,20 @@ public:
         pages = new QStackedWidget(); pages->setObjectName("pages"); outer->addWidget(pages, 1);
         auto *libraryPage = new QWidget(); auto *libraryLayout = new QVBoxLayout(libraryPage); libraryLayout->setContentsMargins(0, 4, 0, 0);
         auto *libraryHeader = new QHBoxLayout(); auto *libraryTitle = new QLabel("App library"); libraryTitle->setStyleSheet("font-size: 20px; font-weight: 650;");
-        auto *add = new QPushButton("＋  Add app"); libraryHeader->addWidget(libraryTitle); libraryHeader->addStretch(); libraryHeader->addWidget(add); libraryLayout->addLayout(libraryHeader);
+        auto *add = new QPushButton("＋  Add app"); libraryHeader->addWidget(libraryTitle); libraryHeader->addStretch();  libraryLayout->addLayout(libraryHeader);
         welcome = new QLabel(); welcome->setWordWrap(true); libraryLayout->addWidget(welcome);
         prepareButton = new QPushButton("Set up Android support"); auto *prepare = prepareButton; libraryLayout->addWidget(prepare);
         prepare->setVisible(!QFileInfo::exists(readSettings().value("atl").toString()));
         connect(prepare, &QPushButton::clicked, this, [this, prepare]{ configureRuntime(); prepare->setVisible(!QFileInfo::exists(atlPath->text())); refreshWelcome(); });
         librarySearch = new QLineEdit(); librarySearch->setPlaceholderText("Search your apps"); librarySearch->setClearButtonEnabled(true); libraryLayout->addWidget(librarySearch);
-        auto *updateAll = new QPushButton("Update apps"); libraryLayout->addWidget(updateAll);
+        auto *updateAll = new QPushButton("Update apps");
         connect(updateAll, &QPushButton::clicked, this, [this]{ updateApps(); });
         connect(librarySearch, &QLineEdit::textChanged, this, [this](const QString &query){
             for (int i = 0; i < appsList->count(); ++i) appsList->item(i)->setHidden(!appsList->item(i)->text().contains(query, Qt::CaseInsensitive));
         });
         add->setProperty("primary", true);
         appsList = new QListWidget(); appsList->setFrameShape(QFrame::NoFrame); appsList->setSpacing(4); appsList->setObjectName("library"); appsList->setIconSize(QSize(48, 48)); appsList->setWordWrap(true); appsList->setSelectionMode(QAbstractItemView::SingleSelection); libraryLayout->addWidget(appsList, 1); pages->addWidget(libraryPage);
+        auto *libraryActions = new QHBoxLayout; libraryActions->addWidget(updateAll); libraryActions->addWidget(add); libraryLayout->addLayout(libraryActions);
         connect(add, &QPushButton::clicked, this, [this]{ addApp(); });
         connect(appsList, &QListWidget::itemActivated, this, [this](QListWidgetItem *item){ if (allowListActivation(appsList)) openDetails(appsList->row(item)); });
         connect(appsList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item){ if (allowListActivation(appsList)) openDetails(appsList->row(item)); });
@@ -690,7 +691,7 @@ public:
         auto *back = new QPushButton("‹  Back to apps"); back->setFlat(true); back->setStyleSheet("text-align: left; padding-left: 0;"); back->hide();
         selectedTitle = new QLabel("App"); selectedTitle->setStyleSheet("font-size: 21px; font-weight: 650;"); detailLayout->addWidget(selectedTitle);
         sourceLabel = new QLabel(); sourceLabel->setWordWrap(true); sourceLabel->setStyleSheet("color: palette(text);"); detailLayout->addWidget(sourceLabel);
-        auto *open = new QPushButton("Open app"); open->setProperty("primary", true); detailLayout->addWidget(open);
+        auto *open = new QPushButton("Open app"); open->setProperty("primary", true);
         connect(open, &QPushButton::clicked, this, [this]{ launchSelected(); });
         auto *advancedToggle = new QPushButton("App settings ▾"); advancedToggle->setCheckable(true);
         auto *advanced = new QWidget(); auto *advancedLayout = new QVBoxLayout(advanced); advancedLayout->setContentsMargins(0, 0, 0, 0); advanced->hide();
@@ -716,8 +717,12 @@ public:
         auto *diagnostics = new QPushButton("View launch log"); detailLayout->addWidget(diagnostics);
         connect(diagnostics, &QPushButton::clicked, this, [this]{ showLaunchLog(); });
         detailLayout->addStretch();
+        auto *clear = new QPushButton("Clear private data…"); clear->setObjectName("clearPrivateData"); detailLayout->addWidget(clear);
+        connect(clear, &QPushButton::clicked, this, [this]{ clearSelectedData(); });
         auto *remove = new QPushButton("Remove app…"); remove->setStyleSheet("color: #b3261e;"); detailLayout->addWidget(remove);
-        detailScroll->setWidget(detailPage); pages->addWidget(detailScroll);
+        detailScroll->setWidget(detailPage);
+        auto *detailContainer = new QWidget; auto *detailContainerLayout = new QVBoxLayout(detailContainer); detailContainerLayout->setContentsMargins(0,0,0,0);
+        detailContainerLayout->addWidget(detailScroll,1); detailContainerLayout->addWidget(open); pages->addWidget(detailContainer);
         connect(back, &QPushButton::clicked, this, [this]{ pages->setCurrentIndex(0); });
         connect(launch, &QPushButton::clicked, this, [this]{ launchSelected(); });
         connect(checkButton, &QPushButton::clicked, this, [this]{ checkSelected(); });
@@ -733,7 +738,7 @@ public:
         auto *explain = new QLabel("Android support is set up once and shared by all your apps. App updates and Android support updates are separate.\n\nApps run through Android Translation Layer. Compatibility varies by app."); explain->setWordWrap(true); runtimeLayout->addWidget(explain); runtimeLayout->addStretch(); pages->addWidget(runtimePage);
         connect(settingsButton, &QPushButton::clicked, this, [this]{ previousMainPage = pages->currentIndex(); pages->setCurrentIndex(2); });
         connect(navBack, &QPushButton::clicked, this, [this]{ navigateBack(); });
-        connect(pages, &QStackedWidget::currentChanged, this, [this, settingsButton](int index){ navBack->setEnabled(index != 0); settingsButton->setEnabled(index != 2); }); navBack->setEnabled(false);
+        connect(pages, &QStackedWidget::currentChanged, this, [this, settingsButton, subtitle, heading](int index){ subtitle->setVisible(index == 0); heading->setText(index == 2 ? "Settings" : "ATL Shelf"); navBack->setEnabled(index != 0); settingsButton->setEnabled(index != 2); }); navBack->setEnabled(false);
         for (auto *form : findChildren<QFormLayout *>()) form->setRowWrapPolicy(QFormLayout::WrapLongRows);
         const QJsonObject settingsObject = readSettings();
         atlPath->setText(settingsObject.value("atl").toString());
@@ -1105,6 +1110,22 @@ private:
         TransferProgress progress("Checking for an app update…", this); QString message; const bool updated = updateOne(o, &message); progress.hide();
         if (updated) { apps[row] = o; writeApps(apps); updateDesktop(o, atlPath->text()); }
         status->setText(progress.wasCanceled() ? "Update canceled." : message); reload();
+    }
+    void clearSelectedData() {
+        auto lock = lockLibrary(this); if (!lock) return; loadLatestForAction();
+        const int row=selected(); if(row<0 || row>=apps.size()) return;
+        const auto entry=apps[row].toObject();
+        if (!ShelfCli::processes(entry).isEmpty()) { mobileNotice(this,"App is running","Close the app before clearing its private data."); return; }
+        MobileDialog confirm(this); confirm.setWindowTitle("Clear private data");
+        auto *layout=new QVBoxLayout(&confirm);
+        auto *text=new QLabel("Clear private data for " + entry.value("name").toString() + "?\n\nThis deletes local app settings, databases, downloaded app data and cache. You may need to sign in again. This cannot be undone.\n\nThe installed APK, icon and update settings are kept. Shared files and system keyring entries are not deleted.");
+        text->setTextFormat(Qt::PlainText); text->setWordWrap(true); layout->addWidget(text); layout->addStretch();
+        auto *clear=new QPushButton("Clear private data"); layout->addWidget(clear);
+        connect(clear,&QPushButton::clicked,&confirm,&QDialog::accept);
+        if(confirm.exec()!=QDialog::Accepted) return;
+        QString error;
+        if(!ShelfCli::clearPrivateData(entry,&error)) { mobileNotice(this,"Could not clear data",error); return; }
+        status->setText("Private data cleared. Open the app to set it up again.");
     }
     void removeSelected() {
         auto lock = lockLibrary(this); if (!lock) return; loadLatestForAction();

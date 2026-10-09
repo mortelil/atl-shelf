@@ -73,6 +73,23 @@ private slots:
         button(w.get(), "Settings")->click(); QCOMPARE(w->findChild<QStackedWidget *>("pages")->currentIndex(), 2);
         QVERIFY(button(w.get(), "Look for ATL updates")->isVisible());
     }
+    void mobileLayoutAndClearDataConfirmation() {
+        std::unique_ptr<QWidget> w(createShelfForTests()); w->resize(360, 740); w->show(); QTest::qWait(80);
+        QCOMPARE(w->width(), 360);
+        auto *subtitle=w->findChild<QLabel *>("librarySubtitle"); QVERIFY(subtitle);
+        auto *back=w->findChild<QPushButton *>("mainBack");
+        QVERIFY(subtitle->mapTo(w.get(),QPoint()).y() >= back->mapTo(w.get(),QPoint()).y()+back->height());
+        auto *library=w->findChild<QListWidget *>("library");
+        QVERIFY(button(w.get(),"＋  Add app")->mapTo(w.get(),QPoint()).y() >= library->mapTo(w.get(),QPoint()).y()+library->height());
+        QTest::mouseClick(library->viewport(),Qt::LeftButton,Qt::NoModifier,library->visualItemRect(library->item(0)).center());
+        const QString data=dataRoot+"/ATL Shelf/atl-shelf/apps/immich/app.apk_/database"; put(data,"private");
+        QTimer::singleShot(50,[&]{ auto *page=qobject_cast<QDialog *>(currentPageForTests()); QVERIFY(page); QCOMPARE(visibleWindows(),1); page->reject(); });
+        button(w.get(),"Clear private data…")->click(); QVERIFY(QFile::exists(data));
+        QTimer::singleShot(50,[&]{ auto *page=qobject_cast<QDialog *>(currentPageForTests()); QVERIFY(page); button(page,"Clear private data")->click(); });
+        button(w.get(),"Clear private data…")->click(); QVERIFY(!QFile::exists(data));
+        QVERIFY(QFile::exists(dataRoot+"/ATL Shelf/atl-shelf/apps/immich/app.apk"));
+        QVERIFY(button(w.get(),"Open app")->isVisible());
+    }
     void cancelNetworkTransfer() {
         QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
         std::unique_ptr<QWidget> parent(createShelfForTests()); parent->show(); bool canceled = false;

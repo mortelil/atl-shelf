@@ -59,6 +59,7 @@ atl-shelf cli update immich
 atl-shelf cli replace example --apk /home/user/Downloads/new-version.apk
 atl-shelf cli icons --all
 atl-shelf cli refresh
+atl-shelf cli clear-data example
 atl-shelf cli remove example --keep-data
 atl-shelf cli remove immich
 ```
@@ -66,6 +67,8 @@ atl-shelf cli remove immich
 GitHub picks the compatible release asset. F-Droid uses the same signed-index/hash checks as the GUI. APKMirror search is supported, but APK downloads must be imported from a local file; there is no automatic APKMirror updater. CLI installs default to manual updates unless `--daily` is given. Daily updates require GitHub/F-Droid and a systemd user manager.
 
 `check-updates` checks version metadata without installing an APK. Bulk checks/updates skip manual sources and return a result for each app. `replace` replaces only the APK, preserves app data and source settings, and clears stale version metadata. Stop running apps before replacing, updating or removing them. `icons` refreshes APK launcher icons; `refresh` regenerates menu entries.
+
+`clear-data ID` immediately clears the managed APK’s private directory (`app.apk_`) and local `.cache`, preserving the APK, icon, library settings, logs and menu entry. Close the app first. Custom data roots are refused to protect shared data. Shared media and system keyring entries are not deleted. There is no CLI confirmation; the GUI asks before clearing.
 
 `remove` immediately removes the library record, update timer, menu entry and managed app directory; there is no interactive prompt. `--keep-data` leaves the app directory. Existing IDs and orphaned data directories are never silently reused. The GUI refreshes its library when CLI writes arrive; return to the library to refresh an open details page.
 

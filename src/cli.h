@@ -59,6 +59,29 @@ static QJsonArray processes(const QJsonObject &entry) {
     }
     return result;
 }
+// ATL stores the launched APK's private files in <data root>/<APK filename>_.
+static bool clearPrivateData(const QJsonObject &entry, QString *error) {
+    if (!processes(entry).isEmpty()) { *error = "Close the app before clearing its private data."; return false; }
+    const QString base = QDir::cleanPath(appDir(entry));
+    if (!validId(entry.value("id").toString()) || QFileInfo(base).isSymLink() ||
+        QFileInfo(base).canonicalFilePath() != base) {
+        *error = "The managed app directory is missing or redirected. Nothing was cleared."; return false;
+    }
+    auto env = readSettings().value("runtimeEnv").toObject();
+    const auto local = entry.value("launchEnv").toObject();
+    for (auto i=local.begin(); i!=local.end(); ++i) env[i.key()]=i.value();
+    if (env.contains("ANDROID_APP_DATA_DIR") && QDir::cleanPath(env.value("ANDROID_APP_DATA_DIR").toString()) != base) {
+        *error = "This app uses a custom data directory. Automatic clearing is unavailable to protect shared data."; return false;
+    }
+    for (const auto &name : QStringList{QFileInfo(apkPath(entry)).fileName()+"_", ".cache"}) {
+        const QString path = base+"/"+name;
+        const QFileInfo info(path);
+        // Unlink a symlink itself; never traverse its target.
+        const bool ok = info.isSymLink() ? QFile::remove(path) : !info.exists() || (info.isDir() ? QDir(path).removeRecursively() : QFile::remove(path));
+        if (!ok) { *error = "Could not clear " + path + ". Some private data may already have been removed."; return false; }
+    }
+    return true;
+}
 static QJsonObject inspect(QJsonObject entry) {
     entry["apkPath"]=apkPath(entry); entry["dataDirectory"]=appDir(entry);
     entry["logPath"]=appDir(entry)+"/launch.log"; entry["processes"]=processes(entry);
@@ -121,6 +144,7 @@ static QJsonObject help() {
             "check-updates ID | check-updates --all",
             "update ID | update --all",
             "remove ID [--keep-data]",
+            "clear-data ID",
             "icons ID | icons --all",
             "refresh (regenerate menu entries)",
             "runtime show | runtime update [--jobs N]",
@@ -151,7 +175,7 @@ static int shelfCli(QStringList arguments) {
         } else positional<<a;
     }
     const QString command=positional.value(0), id=positional.value(1);
-    const QStringList commands{"status","doctor","list","show","search","install","replace","configure","settings","launch","stop","logs","check-updates","update","remove","icons","refresh","runtime"};
+    const QStringList commands{"status","doctor","list","show","search","install","replace","configure","settings","launch","stop","logs","check-updates","update","remove","clear-data","icons","refresh","runtime"};
     if(!commands.contains(command) || positional.size()>2) return reply(false,{},"Unknown command or extra argument. Run atl-shelf cli help.",2);
     const QMap<QString,QStringList> allowed{
         {"search",{"--source","--query"}}, {"install",{"--source","--value","--name","--id","--daily","--source-url"}},
@@ -181,7 +205,7 @@ static int shelfCli(QStringList arguments) {
         if(error.error!=QJsonParseError::NoError || !doc.isObject()) return reply(false,{},"Expected a JSON object: "+error.errorString(),2);
         patch=doc.object();
     }
-    const bool modifies=QStringList{"install","replace","configure","update","remove","icons","refresh","runtime"}.contains(command) || (command=="settings" && (options.contains("--set")||options.contains("--file")));
+    const bool modifies=QStringList{"install","replace","configure","update","remove","clear-data","icons","refresh","runtime"}.contains(command) || (command=="settings" && (options.contains("--set")||options.contains("--file")));
     auto lock=(modifies && !(command=="runtime" && id=="show")) ? lockLibrary() : std::unique_ptr<QLockFile>();
     if(modifies && !(command=="runtime" && id=="show") && !lock) return reply(false,{},"Another installation, update or settings change is running.",4);
     auto entries=readApps();
@@ -305,6 +329,10 @@ static int shelfCli(QStringList arguments) {
     }
     const int index=selected.first(); auto entry=entries[index].toObject();
     if(command=="show") return reply(true,inspect(entry));
+    if(command=="clear-data") {
+        QString error; const bool ok=clearPrivateData(entry,&error);
+        return reply(ok,QJsonObject{{"id",id},{"cleared",ok}},error);
+    }
     if(command=="replace") {
         if(!processes(entry).isEmpty()) return reply(false,{},"Stop the app before replacing its APK.",4);
         QFile file(options.value("--apk")); if(!file.open(QIODevice::ReadOnly)) return reply(false,{},"Provide a readable --apk file.",2);

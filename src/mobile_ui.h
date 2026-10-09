@@ -64,7 +64,7 @@ class MobileDialog : public QDialog {
         }
         for (auto *form : body->findChildren<QFormLayout *>()) if (form->rowWrapPolicy() != QFormLayout::WrapAllRows) form->setRowWrapPolicy(QFormLayout::WrapLongRows);
         auto *outer = new QVBoxLayout(this); outer->setContentsMargins(18, 16, 18, 16); outer->setSpacing(12);
-        auto *row = new QHBoxLayout; back = new QPushButton(backText); back->setObjectName("pageBack"); back->setFixedWidth(100); row->addWidget(back);
+        auto *row = new QHBoxLayout; back = new QPushButton(backText); back->setObjectName("pageBack"); back->setFixedWidth(80); row->addWidget(back);
         auto *title = new QLabel(windowTitle()); title->setWordWrap(true); title->setStyleSheet("font-size: 20px; font-weight: 600;"); row->addWidget(title, 1); outer->addLayout(row);
         QObject::connect(back, &QPushButton::clicked, this, [this]{ reject(); });
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(body); outer->addWidget(scroll, 1);
