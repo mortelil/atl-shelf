@@ -213,6 +213,16 @@ esac
         QCOMPARE(image.pixelColor(256,256),QColor("#ff0000"));
         QCOMPARE(image.pixelColor(256,30),QColor("#1122cc"));
     }
+    void cliRefreshesVisibleLibrary() {
+        std::unique_ptr<QWidget> w(createShelfForTests()); w->resize(408,794); w->show();
+        auto *list=w->findChild<QListWidget *>("appsList");
+        if(!list) list=w->findChild<QListWidget *>();
+        QVERIFY(list); QVERIFY(list->count()>0);
+        const QString binary=qEnvironmentVariable("SHELF_BINARY",QCoreApplication::applicationDirPath()+"/atl-shelf");
+        QProcess cli; cli.start(binary,{"cli","configure","immich","--set",R"({"name":"Changed over SSH"})"});
+        QVERIFY(cli.waitForFinished(5000)); QCOMPARE(cli.exitCode(),0);
+        QTRY_VERIFY(list->item(0)->text().contains("Changed over SSH"));
+    }
     void singleInstance() {
         const QString binary=qEnvironmentVariable("SHELF_BINARY",QCoreApplication::applicationDirPath()+"/atl-shelf");
         QProcess first; first.start(binary); QVERIFY(first.waitForStarted());

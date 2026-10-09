@@ -6,11 +6,14 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QDateTime>
+#include <QFile>
+#include <QStandardPaths>
 
 struct DisplayProfile {
     QSize pixels;
     QSize logical;
     double scale = 1;
+    QString source;
 };
 inline DisplayProfile currentDisplay() {
     static DisplayProfile cached;
@@ -22,6 +25,19 @@ inline DisplayProfile currentDisplay() {
     cached.logical = screen ? screen->availableGeometry().size() : QSize(960, 540);
     cached.scale = screen ? screen->devicePixelRatio() : 1;
     cached.pixels = cached.logical * cached.scale;
+    cached.source = screen ? "qt" : "fallback";
+    if (!screen) {
+        QFile file(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/settings.json");
+        if (file.open(QIODevice::ReadOnly)) {
+            const auto settings = QJsonDocument::fromJson(file.readAll()).object();
+            const QSize pixels(settings.value("screenWidth").toInt(), settings.value("screenHeight").toInt());
+            const double scale = settings.value("runtimeEnv").toObject().value("ATL_RENDER_SCALE").toString().toDouble();
+            if (pixels.isValid() && scale >= 1 && scale <= 4) {
+                cached.pixels = pixels; cached.scale = scale; cached.source = "saved";
+                cached.logical = QSize(qRound(pixels.width() / scale), qRound(pixels.height() / scale));
+            }
+        }
+    }
     // Qt can round a fractional Wayland scale to an integer buffer scale.
     // KScreen supplies the actual output mode and compositor scale on Plasma.
     QProcess query;
@@ -40,7 +56,8 @@ inline DisplayProfile currentDisplay() {
             QSize pixels(size.value("width").toInt(), size.value("height").toInt());
             if (!pixels.isValid() || scale < 1 || scale > 4) continue;
             if (output.value("rotation").toInt() == 2 || output.value("rotation").toInt() == 8) pixels.transpose();
-            cached.pixels = pixels; cached.scale = scale;
+            cached.pixels = pixels; cached.scale = scale; cached.source = "kscreen";
+            if (!screen) cached.logical = QSize(qRound(pixels.width() / scale), qRound(pixels.height() / scale));
             return cached;
         }
     }

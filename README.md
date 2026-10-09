@@ -2,6 +2,10 @@
 
 ATL Shelf is a Plasma-friendly app library and setup assistant for Android APKs that run through the Android Translation Layer. It can prepare the ATL runtime, install apps from GitHub Releases or F-Droid (and manually from APKMirror/local APKs), create Plasma launchers, and check for updates.
 
+## SSH / CLI control
+
+`atl-shelf cli help` exposes the app manager over SSH with JSON output, stable exit codes, and no GUI dependency. Inspect/configure apps and the runtime, search/install/update/remove APKs, preview or run launch commands, stop apps, and read/follow logs. See the [CLI and agent guide](docs/CLI.md) for all commands and examples.
+
 ## Everyday use
 
 The library is the home screen. Tap **Add app**, choose a source, then **Install app**. F-Droid starts with search; GitHub accepts a repository link and recommends a compatible release APK. App names are filled in automatically. APKMirror explicitly uses a browser download; local APKs are checked for device compatibility before installation.

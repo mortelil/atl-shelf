@@ -178,6 +178,7 @@ public:
     void setRange(int min, int max) { bar->setRange(min, max); }
     void setValue(int value) { bar->setValue(value); }
 };
+static bool (*requestCanceled)() = nullptr;
 static QByteArray httpGet(const QUrl &url, int *status = nullptr, bool html = false) {
     if (transferDialog && transferDialog->wasCanceled()) { if (status) *status = 0; return {}; }
     QNetworkAccessManager manager;
@@ -201,6 +202,8 @@ static QByteArray httpGet(const QUrl &url, int *status = nullptr, bool html = fa
         }
     });
     if (transferDialog) QObject::connect(transferDialog, &QDialog::rejected, reply, &QNetworkReply::abort);
+    QTimer cancelPoll;
+    if (requestCanceled) { QObject::connect(&cancelPoll, &QTimer::timeout, reply, [reply] { if (requestCanceled()) reply->abort(); }); cancelPoll.start(100); }
     timer.start(60000); loop.exec();
     if (status) *status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QByteArray bytes = reply->error() == QNetworkReply::NoError ? reply->readAll() : QByteArray();
@@ -257,6 +260,7 @@ static int apkArchitectureScore(const QString &fileName) {
     return hasAbi ? -1 : 50;
 }
 
+static QString normalizeRepo(QString s) { s = s.trimmed(); s.remove(QRegularExpression("^https?://(www\\.)?github\\.com/", QRegularExpression::CaseInsensitiveOption)); while (s.endsWith('/')) s.chop(1); s.remove(QRegularExpression("\\.git$", QRegularExpression::CaseInsensitiveOption)); return s; }
 static QJsonObject latestGithubRelease(const QString &repo, int *status = nullptr) {
     const QUrl url("https://api.github.com/repos/" + repo.trimmed() + "/releases/latest");
     return QJsonDocument::fromJson(httpGet(url, status)).object();
@@ -513,6 +517,7 @@ static bool resolveApkSource(const QJsonObject &o, ApkSourceResult *result) {
     result->version = releaseVersion; return true;
 }
 static bool stageAndActivate(QJsonObject &o, const QByteArray &bytes, QString *message) {
+    if (requestCanceled && requestCanceled()) { *message = "Interrupted before activating the APK."; return false; }
     const QString dir = appDir(o); QDir().mkpath(dir);
     QFile staged(dir + "/app.apk.new");
     if (!staged.open(QIODevice::WriteOnly) || staged.write(bytes) != bytes.size()) { *message = "Could not write the APK file."; return false; }
@@ -563,11 +568,13 @@ static bool writeTimer(const QJsonObject &o, bool enabled, QString *why = nullpt
     const QString unitDir = QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/.config/systemd/user";
     const QString base = "atl-shelf-" + id;
     if (!enabled) {
-        QProcess::execute("systemctl", {"--user", "disable", "--now", base + ".timer"});
-        QProcess::execute("systemctl", {"--user", "stop", base + ".service"});
-        QFile::remove(unitDir + "/" + base + ".timer"); QFile::remove(unitDir + "/" + base + ".service");
-        QProcess::execute("systemctl", {"--user", "daemon-reload"});
-        return true;
+        if (!QFile::exists(unitDir + "/" + base + ".timer") && !QFile::exists(unitDir + "/" + base + ".service")) return true;
+        if (!runUserSystemctl({"disable", "--now", base + ".timer"}, why) || !runUserSystemctl({"stop", base + ".service"}, why)) return false;
+        for (const auto &suffix : {".timer", ".service"}) {
+            const QString path = unitDir + "/" + base + suffix;
+            if (QFile::exists(path) && !QFile::remove(path)) { if (why) *why = "Could not remove " + path; return false; }
+        }
+        return runUserSystemctl({"daemon-reload"}, why);
     }
     QDir().mkpath(unitDir);
     QFile service(unitDir + "/" + base + ".service");
@@ -588,16 +595,22 @@ static bool writeTimer(const QJsonObject &o, bool enabled, QString *why = nullpt
     return false;
 }
 
-static bool launchAndroidApp(const QJsonObject &o, QString *error) {
+struct LaunchPlan {
+    QString program, workingDirectory;
+    QStringList arguments;
+    QProcessEnvironment environment;
+    QJsonObject overrides;
+};
+static bool prepareLaunch(const QJsonObject &o, LaunchPlan *plan, QString *error) {
         const QJsonObject settings = readSettings();
         const QString launcher = settings.value("launcher").toString(settings.value("atl").toString());
         if (settings.value("atl").toString().isEmpty() || !QFileInfo::exists(settings.value("atl").toString()) || !QFileInfo(launcher).isExecutable()) { *error = "Set up Android support in Shelf before launching apps."; return false; }
-        QProcess p; p.setProgram(launcher); QStringList args{apkPath(o)};
+        plan->program = launcher; QStringList args{apkPath(o)};
         if (!o.value("activity").toString().isEmpty()) args << "-l" << o.value("activity").toString();
         // GTK window arguments are logical coordinates; Android renders at output density.
         const auto display = currentDisplay();
         const QSize windowSize = o.value("fitScreen").toBool(true) ? display.logical : QSize(qRound(appWindowSize(o).width() / display.scale), qRound(appWindowSize(o).height() / display.scale));
-        args << "-w" << QString::number(windowSize.width()) << "-h" << QString::number(windowSize.height()); p.setArguments(args);
+        args << "-w" << QString::number(windowSize.width()) << "-h" << QString::number(windowSize.height()); plan->arguments = args;
         auto env = QProcessEnvironment::systemEnvironment();
         const QJsonObject launchEnv = o.value("launchEnv").toObject();
         QJsonObject mergedEnv = settings.value("runtimeEnv").toObject();
@@ -605,14 +618,29 @@ static bool launchAndroidApp(const QJsonObject &o, QString *error) {
         for (auto it = mergedEnv.begin(); it != mergedEnv.end(); ++it)
             if (QRegularExpression("^[A-Za-z_][A-Za-z0-9_]*$").match(it.key()).hasMatch() && it.value().isString()) env.insert(it.key(), it.value().toString());
         if (!mergedEnv.contains("ANDROID_APP_DATA_DIR")) env.insert("ANDROID_APP_DATA_DIR", appDir(o));
-        env.insert("ATL_RENDER_SCALE", QString::number(display.scale)); p.setProcessEnvironment(env);
+        env.insert("ATL_RENDER_SCALE", QString::number(display.scale)); plan->environment = env;
         const QString workdir = o.value("workingDirectory").toString(settings.value("workingDirectory").toString());
-        if (!workdir.isEmpty()) p.setWorkingDirectory(workdir);
-        p.setStandardOutputFile(appDir(o) + "/launch.log", QIODevice::Truncate);
-        p.setProcessChannelMode(QProcess::MergedChannels);
-        if (!p.startDetached()) { *error = p.errorString(); return false; }
+        plan->workingDirectory = workdir;
+        plan->overrides = mergedEnv;
+        plan->overrides["ATL_RENDER_SCALE"] = QString::number(display.scale);
+        plan->overrides["ANDROID_APP_DATA_DIR"] = env.value("ANDROID_APP_DATA_DIR");
         return true;
 }
+static void applyLaunch(QProcess &process, const LaunchPlan &plan) {
+    process.setProgram(plan.program); process.setArguments(plan.arguments);
+    process.setProcessEnvironment(plan.environment);
+    if (!plan.workingDirectory.isEmpty()) process.setWorkingDirectory(plan.workingDirectory);
+    process.setProcessChannelMode(QProcess::MergedChannels);
+}
+static bool launchAndroidApp(const QJsonObject &o, QString *error) {
+    LaunchPlan plan; if (!prepareLaunch(o, &plan, error)) return false;
+    QProcess process; applyLaunch(process, plan);
+    process.setStandardOutputFile(appDir(o) + "/launch.log", QIODevice::Truncate);
+    if (!process.startDetached()) { *error = process.errorString(); return false; }
+    return true;
+}
+#include "cli.h"
+#include <QFileSystemWatcher>
 
 class Shelf : public QWidget {
     Q_OBJECT
@@ -715,6 +743,11 @@ public:
         reload();
         // Refresh existing menu entries after runtime profile migrations.
         for (const auto &app : apps) updateDesktop(app.toObject(), atlPath->text());
+        auto *libraryWatcher = new QFileSystemWatcher(this); libraryWatcher->addPath(rootDir());
+        connect(libraryWatcher, &QFileSystemWatcher::directoryChanged, this, [this] {
+            if (shell->currentWidget() == mainPage && pages->currentIndex() == 0) { atlPath->setText(readSettings().value("atl").toString()); reload(); }
+        });
+        connect(pages, &QStackedWidget::currentChanged, this, [this](int index) { if (index == 0) reload(); });
 #ifndef ATL_SHELF_TESTING
         bool missingIcons = false;
         for (const auto &app : apps) if (app.toObject().value("iconSource").toString() != "apk") missingIcons = true;
@@ -1138,7 +1171,7 @@ private:
         connect(tabs, &QTabWidget::currentChanged, &dialog, [=](int tab) { autoUpdate->setEnabled(tab == 0 || tab == 1); addButton->setText("Install app"); appName->clear(); });
 
         QJsonObject release; QString localFile; QString fdName, fdPackage, fdVersion; QString fdCode; QJsonObject mirrorChoice;
-        auto normalizeRepo = [](QString s) { s = s.trimmed(); s.remove(QRegularExpression("^https?://(www\\.)?github\\.com/", QRegularExpression::CaseInsensitiveOption)); while (s.endsWith('/')) s.chop(1); s.remove(QRegularExpression("\\.git$", QRegularExpression::CaseInsensitiveOption)); return s; };
+
         connect(fetchReleases, &QPushButton::clicked, &dialog, [&] {
             const QString normalized = normalizeRepo(ghRepo->text()); ghRepo->setText(normalized);
             if (!QRegularExpression("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").match(normalized).hasMatch()) { ghInfo->setText("Enter the repository as owner/name."); return; }
@@ -1277,6 +1310,10 @@ QByteArray fetchForTests(const QUrl &url, QWidget *parent) { TransferProgress pr
 int main(int argc,char **argv) {
     const QByteArray activationToken = qgetenv("XDG_ACTIVATION_TOKEN");
     const QStringList args = [&] { QStringList a; for (int i=0; i<argc; ++i) a << QString::fromLocal8Bit(argv[i]); return a; }();
+    if ((args.size() > 1 && args[1] == "cli") || args.contains("--help") || args.contains("--version")) {
+        QCoreApplication app(argc,argv); QCoreApplication::setApplicationName("atl-shelf"); QCoreApplication::setOrganizationName("ATL Shelf");
+        return shelfCli(args.mid(1));
+    }
     if (args.size() == 2 && args[1] == "--refresh-icons") {
         QCoreApplication app(argc,argv); QCoreApplication::setApplicationName("atl-shelf"); QCoreApplication::setOrganizationName("ATL Shelf");
         auto lock = lockLibrary(); if (!lock) return 3;
