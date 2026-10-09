@@ -30,7 +30,7 @@ class RuntimeUpdateTest(unittest.TestCase):
         for repo in reversed(REPOS):
             remote = base / repo
             remote.mkdir()
-            self.git(remote, 'init', '-b', 'linux-mobile-experimental')
+            self.git(remote, 'init', '-b', 'main')
             (remote / 'source').write_text('original')
             if repo == 'android_translation_layer':
                 (remote / 'dependency-lock.json').write_text(json.dumps({'dependencies': pins}))
@@ -79,6 +79,15 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
         (self.workspace / 'android_translation_layer/source').write_text('user edit')
         self.run_update(ok=False)
         self.assertEqual((self.workspace / 'android_translation_layer/source').read_text(), 'user edit')
+
+    def test_existing_checkout_after_branch_rename(self):
+        for repo in REPOS:
+            self.git(self.workspace / repo, 'branch', '-m', 'linux-mobile-experimental')
+        remote = self.remotes['android_translation_layer']
+        (remote / 'source').write_text('new main revision')
+        revision = self.commit(remote)
+        self.run_update()
+        self.assertEqual(self.git(self.workspace / 'android_translation_layer', 'rev-parse', 'HEAD'), revision)
 
     def test_generated_sources_are_backed_up(self):
         self.run_update()

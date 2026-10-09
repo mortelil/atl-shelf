@@ -21,7 +21,7 @@ trap 'rm -rf "$root/.build-lock"' EXIT
 trap 'exit 130' INT TERM
 mkdir -p "$workspace"
 case "$mode" in
-    github) branch=linux-mobile-experimental; remote=https://github.com/mortelil ;;
+    github) branch=main; remote=https://github.com/mortelil ;;
     gitlab) branch=master; remote=https://gitlab.com/android_translation_layer ;;
     *) echo "Unknown runtime source: $mode" >&2; exit 2 ;;
 esac

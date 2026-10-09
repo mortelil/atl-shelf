@@ -24,7 +24,7 @@ The physical panel size and the logical window size differ on scaled desktops. O
 
 Choose **Set up runtime…** in the app and select one of:
 
-- **Build the mobile fork from mortelil on GitHub** downloads the matching `linux-mobile-experimental` ATL, bionic_translation, and art_standalone branches, installs the build dependencies through Alpine `apk` with a graphical Polkit prompt, and builds a private runtime under `~/.local/share/atl-shelf/runtime`.
+- **Build the mobile fork from mortelil on GitHub** downloads the matching `main` ATL, bionic_translation, and art_standalone branches, installs the build dependencies through Alpine `apk` with a graphical Polkit prompt, and builds a private runtime under `~/.local/share/atl-shelf/runtime`.
 - **Build from ATL GitLab** downloads the three upstream `master` source repositories and builds them into the same private runtime.
 - **Install with Alpine APK** installs `android-translation-layer`, `bionic_translation`, and `art_standalone` from the configured Alpine repositories. APK resolves and installs their package dependencies.
 - **Use an existing binary** points ATL Shelf at an ATL executable already on the device.
