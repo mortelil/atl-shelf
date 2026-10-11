@@ -169,6 +169,25 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
         self.run_update(ok=False)
         self.assertEqual(source.read_text(), 'user modified managed patch')
 
+    def test_integrated_patch_accepts_changed_context_but_not_missing_additions(self):
+        remote = self.remotes['android_translation_layer']
+        baseline = 'before\nlegacy\nafter\n'
+        (remote / 'source').write_text(baseline)
+        self.commit(remote)
+        (remote / 'source').write_text('before\ndensity fix\nafter\n')
+        self.patch_file = self.root / 'display.patch'
+        self.patch_file.write_text(self.git(remote, 'diff') + '\n')
+        # Upstream retains the fix but rewrites adjacent code, breaking reverse apply.
+        (remote / 'source').write_text('new surrounding code\ndensity fix\nnew ending\n')
+        self.commit(remote)
+        self.assertIn('already includes', self.run_update())
+        self.assertFalse((self.root / 'applied-shelf.patch').exists())
+        self.assertEqual(self.git(self.workspace / 'android_translation_layer', 'status', '--porcelain'), '')
+        self.assertIn('No compilation needed', self.run_update())
+        (remote / 'source').write_text('new surrounding code\nmissing fix\nnew ending\n')
+        self.commit(remote)
+        self.run_update(ok=False)
+
     def test_lock_and_network_failure(self):
         (self.root / '.build-lock').mkdir()
         self.run_update(ok=False)

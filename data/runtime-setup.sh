@@ -108,11 +108,45 @@ done > "$root/.build-lock/revisions"
 for repo in android_translation_layer bionic_translation art_standalone; do
     git -C "$workspace/$repo" checkout --detach "$(cat "$root/.build-lock/$repo")"
 done
+# An upstream commit can retain every patch addition while changing surrounding
+# context. Reverse-apply alone then wrongly labels the integrated fix incompatible.
+# Verify all added lines, including duplicate occurrences, in every affected file.
+patch_additions_present() {
+    python3 - "$patch_file" "$workspace/android_translation_layer" <<'PYTHON'
+import collections
+import pathlib
+import sys
+patch, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+required = {}
+path = None
+in_hunk = False
+for line in patch.read_text().splitlines():
+    if line.startswith('diff --git '):
+        path, in_hunk = None, False
+    elif line.startswith('+++ b/'):
+        path = line[6:]
+    elif line.startswith('@@ '):
+        in_hunk = True
+    elif in_hunk and path and line.startswith('+') and line[1:].strip():
+        required.setdefault(path, collections.Counter())[line[1:].strip()] += 1
+if not required:
+    sys.exit(1)
+for name, additions in required.items():
+    try:
+        actual = collections.Counter(line.strip() for line in (root / name).read_text().splitlines())
+    except (OSError, UnicodeError):
+        sys.exit(1)
+    if additions - actual:
+        sys.exit(1)
+PYTHON
+}
 if [ "$mode" = github ] && [ -s "$patch_file" ]; then
-    if git -C "$workspace/android_translation_layer" apply --check "$patch_file"; then
+    if git -C "$workspace/android_translation_layer" apply --check "$patch_file" 2>/dev/null; then
         git -C "$workspace/android_translation_layer" apply "$patch_file"
         cp "$patch_file" "$applied_patch"
-    elif ! git -C "$workspace/android_translation_layer" apply --reverse --check "$patch_file"; then
+    elif git -C "$workspace/android_translation_layer" apply --reverse --check "$patch_file" 2>/dev/null || patch_additions_present; then
+        echo "ATL already includes the Shelf display patch; using upstream implementation."
+    else
         echo "This ATL revision needs a newer Shelf display patch. Runtime was not rebuilt." >&2
         exit 1
     fi
