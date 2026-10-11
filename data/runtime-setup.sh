@@ -43,6 +43,22 @@ for repo in android_translation_layer bionic_translation art_standalone; do
         fi
         git clone --depth 1 --branch "$branch" "$remote/$repo.git" "$dir"
     fi
+    # The mobile ART builder keeps compiler-specific outputs here, and links
+    # installed libraries into that tree. Keep it intact across updates. Its
+    # dependency checker includes untracked files, unlike our tracked-edit check.
+    # Use a checkout-local exclusion, never modify upstream .gitignore or disable
+    # dependency validation. Tracked edits remain visible even under this path.
+    if [ "$mode" = github ] && [ "$repo" = art_standalone ]; then
+        case $(uname -m) in
+            aarch64|x86_64) art_output="/out-messenger-$(uname -m)/" ;;
+            *) echo "Unsupported mobile ART architecture" >&2; exit 1 ;;
+        esac
+        exclude="$(git -C "$dir" rev-parse --absolute-git-dir)/info/exclude"
+        mkdir -p "$(dirname "$exclude")"
+        if ! grep -Fqx "$art_output" "$exclude" 2>/dev/null; then
+            printf '\n# ATL Shelf: private ART build outputs (retain linked runtime libraries)\n%s\n' "$art_output" >> "$exclude"
+        fi
+    fi
     # aapt rewrites these tracked generated files during ordinary builds.
     # Preserve their contents before restoring them for checkout.
     if [ "$repo" = android_translation_layer ]; then
@@ -60,7 +76,9 @@ for repo in android_translation_layer bionic_translation art_standalone; do
             fi
         done
     fi
-    if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]; then
+    untracked=no
+    if [ "$mode" = github ] && [ "$repo" = art_standalone ]; then untracked=normal; fi
+    if [ -n "$(git -C "$dir" status --porcelain --untracked-files="$untracked")" ]; then
         echo "Local changes in $dir. Commit or move them before updating." >&2
         exit 1
     fi

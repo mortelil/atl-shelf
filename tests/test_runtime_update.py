@@ -41,6 +41,8 @@ class RuntimeUpdateTest(unittest.TestCase):
                 (mobile / 'build.sh').write_text('''#!/bin/sh
 set -eu
 root=$(dirname "$ATL_WORKSPACE")
+# Match ATL's companion validator, including untracked files.
+test -z "$(git -C "$ATL_WORKSPACE/art_standalone" status --porcelain)"
 echo build >> "$root/build-count"
 test ! -f "$root/fail-build"
 mkdir -p "$ATL_BUILD_DIR"
@@ -115,6 +117,31 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
         revision = self.commit(remote)
         self.run_update()
         self.assertEqual(self.git(self.workspace / 'android_translation_layer', 'rev-parse', 'HEAD'), revision)
+
+    def test_art_build_outputs_are_preserved_and_only_locally_ignored(self):
+        art = self.workspace / 'art_standalone'
+        output = art / ('out-messenger-' + os.uname().machine)
+        output.mkdir()
+        library = output / 'libart.so'
+        library.write_text('existing linked runtime library')
+        exclude = art / '.git/info/exclude'
+        exclude.write_text('# user exclusion\n/user-build/\n')
+        self.run_update()
+        self.assertIn('No compilation needed', self.run_update())
+        self.assertEqual(library.read_text(), 'existing linked runtime library')
+        self.assertIn('/user-build/', exclude.read_text())
+        self.assertEqual(exclude.read_text().count('/' + output.name + '/'), 1)
+        self.assertEqual(self.git(art, 'status', '--porcelain'), '')
+        self.assertFalse((art / '.gitignore').exists())
+        # An actual edit must still block updating, without being discarded.
+        (art / 'source').write_text('user edit')
+        self.run_update(ok=False)
+        self.assertEqual((art / 'source').read_text(), 'user edit')
+        self.git(art, 'restore', 'source')
+        # Unknown untracked source files still reach the strict ATL validator.
+        (art / 'new-source.cpp').write_text('user work')
+        self.run_update(ok=False)
+        self.assertEqual((art / 'new-source.cpp').read_text(), 'user work')
 
     def test_generated_sources_are_backed_up(self):
         self.run_update()
