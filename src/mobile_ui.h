@@ -5,6 +5,7 @@
 #include <QMouseEvent>
 #include <QTextCursor>
 #include <QInputMethod>
+#include <QInputMethodEvent>
 #include <QTabWidget>
 #include <QTabBar>
 #include <QScroller>
@@ -84,6 +85,28 @@ public:
                 }
             }
         }
+    }
+};
+
+// A mobile keyboard may display a composing word without adding it to text().
+// Some Wayland input protocols do not commit synchronously. Capture that visible
+// word as a fallback; never inject it into the edit (which could duplicate it).
+class MobileSearchEdit : public QLineEdit {
+    QString composing;
+protected:
+    void inputMethodEvent(QInputMethodEvent *event) override {
+        QLineEdit::inputMethodEvent(event); composing=event->preeditString();
+    }
+    void focusOutEvent(QFocusEvent *event) override {
+        QLineEdit::focusOutEvent(event); composing.clear();
+    }
+public:
+    using QLineEdit::QLineEdit;
+    void setText(const QString &text) { composing.clear(); QLineEdit::setText(text); }
+    QString submittedText() {
+        QString visible=text(); visible.insert(cursorPosition(),composing);
+        QGuiApplication::inputMethod()->commit();
+        return composing.isEmpty() ? text() : visible;
     }
 };
 

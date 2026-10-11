@@ -223,6 +223,19 @@ private slots:
         });
         button(w.get(),"View launch log")->click();
     }
+    void searchIncludesUncommittedKeyboardWord() {
+        MobileSearchEdit query; query.show(); query.setFocus();
+        QInputMethodEvent composing("signal",{}); QApplication::sendEvent(&query,&composing);
+        QVERIFY(query.text().isEmpty()); // Exactly the reported empty-search case.
+        QCOMPARE(query.submittedText(),QString("signal"));
+        QCOMPARE(query.submittedText(),QString("signal")); // No duplication on retry.
+        QInputMethodEvent committed; committed.setCommitString("signal"); QApplication::sendEvent(&query,&committed);
+        QCOMPARE(query.submittedText(),QString("signal"));
+        query.setText("secure "); query.setCursorPosition(7);
+        QApplication::sendEvent(&query,&composing);
+        QCOMPARE(query.submittedText(),QString("secure signal"));
+        query.setText("new query"); QCOMPARE(query.submittedText(),QString("new query"));
+    }
     void cancelNetworkTransfer() {
         QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
         std::unique_ptr<QWidget> parent(createShelfForTests()); parent->show(); bool canceled = false;

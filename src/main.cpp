@@ -1184,15 +1184,15 @@ private:
         connect(tabs, &QTabWidget::currentChanged, &dialog, [tabs]{ tabs->updateGeometry(); });
         connect(sourcePicker, qOverload<int>(&QComboBox::currentIndexChanged), tabs, &QTabWidget::setCurrentIndex);
         auto *githubTab = new QWidget(); auto *ghLayout = new QVBoxLayout(githubTab); auto *ghForm = new QFormLayout();
-        auto *ghRepo = new QLineEdit(); ghRepo->setPlaceholderText("Paste a GitHub link or owner/repository"); auto *fetchReleases = new QPushButton("Find latest release");
+        auto *ghRepo = new MobileSearchEdit(); ghRepo->setPlaceholderText("Paste a GitHub link or owner/repository"); auto *fetchReleases = new QPushButton("Find latest release");
         auto *ghRow = new QVBoxLayout(); ghRow->addWidget(ghRepo, 1); ghRow->addWidget(fetchReleases); auto *ghWrap = new QWidget(); ghWrap->setLayout(ghRow); ghForm->addRow(ghWrap); ghLayout->addLayout(ghForm);
         auto *ghInfo = new QLabel("Fetches APKs from the latest GitHub release and suggests the right CPU architecture."); ghInfo->setWordWrap(true); ghLayout->addWidget(ghInfo);
         auto *ghAssets = new QComboBox(); ghAssets->setMinimumHeight(42); ghLayout->addWidget(ghAssets); ghLayout->addStretch(); tabs->addTab(githubTab, "GitHub");
         auto *fdTab = new QWidget(); auto *fdLayout = new QVBoxLayout(fdTab); auto *searchRow = new QHBoxLayout();
-        auto *fdQuery = new QLineEdit(); fdQuery->setPlaceholderText("Search by app name or feature"); auto *fdSearchButton = new QPushButton("Search"); searchRow->addWidget(fdQuery, 1); searchRow->addWidget(fdSearchButton); fdLayout->addLayout(searchRow);
+        auto *fdQuery = new MobileSearchEdit(); fdQuery->setPlaceholderText("Search by app name or feature"); auto *fdSearchButton = new QPushButton("Search"); searchRow->addWidget(fdQuery, 1); searchRow->addWidget(fdSearchButton); fdLayout->addLayout(searchRow);
         auto *fdResults = new QListWidget(); fdLayout->addWidget(fdResults, 1); auto *fdInfo = new QLabel("Find an app, select it, then tap Install app."); fdInfo->setWordWrap(true); fdLayout->addWidget(fdInfo); tabs->addTab(fdTab, "F-Droid");
         auto *mirrorTab = new QWidget(); auto *mirrorLayout = new QVBoxLayout(mirrorTab); auto *mirrorSearchRow = new QHBoxLayout();
-        auto *mirrorQuery = new QLineEdit(); mirrorQuery->setPlaceholderText("Search by app name or package name"); auto *mirrorSearchButton = new QPushButton("Search"); mirrorSearchRow->addWidget(mirrorQuery, 1); mirrorSearchRow->addWidget(mirrorSearchButton); mirrorLayout->addLayout(mirrorSearchRow);
+        auto *mirrorQuery = new MobileSearchEdit(); mirrorQuery->setPlaceholderText("Search by app name or package name"); auto *mirrorSearchButton = new QPushButton("Search"); mirrorSearchRow->addWidget(mirrorQuery, 1); mirrorSearchRow->addWidget(mirrorSearchButton); mirrorLayout->addLayout(mirrorSearchRow);
         auto *mirrorResults = new QListWidget(); mirrorLayout->addWidget(mirrorResults, 1);
         auto *mirrorInfo = new QLabel("Search APKMirror, open a result, download an APK variant in your browser, then choose the file here."); mirrorInfo->setWordWrap(true); mirrorLayout->addWidget(mirrorInfo);
         auto *mirrorActions = new QHBoxLayout(); auto *mirrorOpen = new QPushButton("Open selected page"); auto *mirrorChoose = new QPushButton("Choose downloaded APK…"); mirrorActions->addWidget(mirrorOpen); mirrorActions->addWidget(mirrorChoose); mirrorLayout->addLayout(mirrorActions); tabs->addTab(mirrorTab, "APKMirror");
@@ -1213,7 +1213,7 @@ private:
         QJsonObject release; QString localFile; QString fdName, fdPackage, fdVersion; QString fdCode; QJsonObject mirrorChoice;
 
         connect(fetchReleases, &QPushButton::clicked, &dialog, [&] {
-            const QString normalized = normalizeRepo(ghRepo->text()); ghRepo->setText(normalized);
+            const QString normalized = normalizeRepo(ghRepo->submittedText()); ghRepo->setText(normalized);
             if (!QRegularExpression("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").match(normalized).hasMatch()) { ghInfo->setText("Enter the repository as owner/name."); return; }
             TransferProgress progress("Looking for the latest release…", &dialog); ghInfo->setText("Looking for the latest release…"); ghAssets->clear(); QApplication::setOverrideCursor(Qt::WaitCursor); int code = 0; release = latestGithubRelease(normalized, &code); QApplication::restoreOverrideCursor();
             if (code != 200 || release.isEmpty()) { ghInfo->setText("No public release found (HTTP " + QString::number(code) + "). Check the repository or try F-Droid."); return; }
@@ -1226,15 +1226,17 @@ private:
             ghInfo->setText("Release ‘" + release.value("tag_name").toString() + "’ · " + QString::number(choices.size()) + " APK file(s). Suggested architecture: " + QSysInfo::currentCpuArchitecture() + ".");
         });
         connect(fdSearchButton, &QPushButton::clicked, &dialog, [&] {
-            if (fdQuery->text().trimmed().isEmpty()) { fdInfo->setText("Enter a search term first."); return; }
-            TransferProgress progress("Searching F-Droid…", &dialog); fdInfo->setText("Searching F-Droid…"); fdResults->clear(); QApplication::setOverrideCursor(Qt::WaitCursor); QString message; const QJsonArray results = searchFdroid(fdQuery->text().trimmed(), &message); QApplication::restoreOverrideCursor();
+            const QString query=fdQuery->submittedText().trimmed();
+            if (query.isEmpty()) { fdInfo->setText("Enter a search term first."); return; }
+            TransferProgress progress("Searching F-Droid…", &dialog); fdInfo->setText("Searching F-Droid…"); fdResults->clear(); QApplication::setOverrideCursor(Qt::WaitCursor); QString message; const QJsonArray results = searchFdroid(query, &message); QApplication::restoreOverrideCursor();
             for (const QJsonValue &v : results) { const QJsonObject item = v.toObject(); const QString title = item.value("name").toString(); const QString id = item.value("packageName").toString(); auto *result = new QListWidgetItem(title + "\n" + id); result->setData(Qt::UserRole, QJsonDocument(item).toJson(QJsonDocument::Compact)); result->setToolTip(item.value("summary").toString()); fdResults->addItem(result); }
             fdInfo->setText(results.isEmpty() ? message : QString::number(results.size()) + " results · select an app to add.");
         });
         connect(mirrorSearchButton, &QPushButton::clicked, &dialog, [&] {
-            if (mirrorQuery->text().trimmed().isEmpty()) { mirrorInfo->setText("Enter a search term first."); return; }
+            const QString query=mirrorQuery->submittedText().trimmed();
+            if (query.isEmpty()) { mirrorInfo->setText("Enter a search term first."); return; }
             TransferProgress progress("Searching APKMirror…", &dialog); mirrorInfo->setText("Searching APKMirror…"); mirrorResults->clear(); mirrorChoice = {};
-            QApplication::setOverrideCursor(Qt::WaitCursor); QString message; const QJsonArray results = searchApkMirror(mirrorQuery->text(), &message); QApplication::restoreOverrideCursor();
+            QApplication::setOverrideCursor(Qt::WaitCursor); QString message; const QJsonArray results = searchApkMirror(query, &message); QApplication::restoreOverrideCursor();
             for (const QJsonValue &value : results) {
                 const QJsonObject item = value.toObject();
                 auto *result = new QListWidgetItem(item.value("name").toString());
@@ -1274,6 +1276,7 @@ private:
         connect(mirrorQuery, &QLineEdit::returnPressed, mirrorSearchButton, &QPushButton::click);
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         connect(addButton, &QPushButton::clicked, &dialog, [&] {
+            QGuiApplication::inputMethod()->commit();
             auto lock = lockLibrary(&dialog); if (!lock) return; loadLatestForAction();
             const int tab = tabs->currentIndex(); const QString display = appName->text().trimmed();
             if (!appWidth->hasAcceptableInput() || !appHeight->hasAcceptableInput()) { mobileNotice(&dialog, "Invalid size", "Enter a width and height between 200 and 4096."); return; }
