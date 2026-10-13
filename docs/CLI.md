@@ -117,11 +117,16 @@ Build output is saved under the runtime directory (`cli-runtime.log` or `cli-dep
 
 ### Complete GitHub runtime
 
-The GitHub setup builds ATL, the pinned Bionic/ART native runtime, D8-desugared
+The GitHub setup and update fetch the latest `main` of ATL, Bionic and ART,
+then build the native runtime, D8-desugared
 core Java classes, and the optional APK signature verifier. It downloads pinned
 R8 and apksig JARs; ATL's build scripts verify their checksums. This requires
 OpenJDK 8 and 21, curl, and jemalloc in addition to the native build dependencies.
 Both GUI and CLI dependency installation include these packages.
+
+Shelf intentionally follows all three branch heads rather than ATL’s companion
+lockfile. Local source edits still stop the update and are preserved. Display
+scaling comes from upstream ATL; Shelf no longer injects its legacy display patch.
 
 When those private runtime artifacts exist, GUI and CLI launches automatically
 select `ATL_CORE_JAR`, `ATL_APK_VERIFIER`, and the jemalloc preload. Explicit

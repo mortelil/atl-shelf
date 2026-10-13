@@ -10,7 +10,6 @@ prefix="$root/prefix"
 build="$workspace/android_translation_layer/build-mobile"
 
 action=${4:-setup}
-patch_file=${5:-$(dirname "$0")/atl-native-density.patch}
 applied_patch="$root/applied-shelf.patch"
 mkdir -p "$root"
 if ! mkdir "$root/.build-lock" 2>/dev/null; then
@@ -46,8 +45,8 @@ for repo in android_translation_layer bionic_translation art_standalone; do
     # The mobile ART builder keeps compiler-specific outputs here, and links
     # installed libraries into that tree. Keep it intact across updates. Its
     # dependency checker includes untracked files, unlike our tracked-edit check.
-    # Use a checkout-local exclusion, never modify upstream .gitignore or disable
-    # dependency validation. Tracked edits remain visible even under this path.
+    # Use a checkout-local exclusion, never modify upstream .gitignore.
+    # Tracked edits remain visible even under this path.
     if [ "$mode" = github ] && [ "$repo" = art_standalone ]; then
         case $(uname -m) in
             aarch64|x86_64) art_output="/out-messenger-$(uname -m)/" ;;
@@ -77,81 +76,25 @@ for repo in android_translation_layer bionic_translation art_standalone; do
         done
     fi
     untracked=no
-    if [ "$mode" = github ] && [ "$repo" = art_standalone ]; then untracked=normal; fi
+    if [ "$mode" = github ] && [ "$repo" != android_translation_layer ]; then untracked=normal; fi
     if [ -n "$(git -C "$dir" status --porcelain --untracked-files="$untracked")" ]; then
         echo "Local changes in $dir. Commit or move them before updating." >&2
         exit 1
     fi
-    if [ "$action" = update ]; then
-        echo "Checking $repo ($branch)…"
-        git -C "$dir" fetch --depth 1 origin "$branch"
-        git -C "$dir" rev-parse FETCH_HEAD > "$root/.build-lock/$repo"
-    else
-        git -C "$dir" rev-parse HEAD > "$root/.build-lock/$repo"
-    fi
+    echo "Checking $repo ($branch)…"
+    git -C "$dir" fetch --depth 1 origin "$branch"
+    git -C "$dir" rev-parse FETCH_HEAD > "$root/.build-lock/$repo"
 done
-# The mobile fork specifies exact companion commits, which can lag their branches.
-if [ "$mode" = github ]; then
-    git -C "$workspace/android_translation_layer" show "$(cat "$root/.build-lock/android_translation_layer"):dependency-lock.json" > "$root/.build-lock/dependencies.json"
-    for repo in bionic_translation art_standalone; do
-        revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dependencies"][sys.argv[2]]["commit"])' "$root/.build-lock/dependencies.json" "$repo")
-        case "$revision" in *[!0-9a-f]*|'') echo "Invalid dependency revision" >&2; exit 1 ;; esac
-        if ! git -C "$workspace/$repo" cat-file -e "$revision^{commit}" 2>/dev/null; then
-            git -C "$workspace/$repo" fetch --depth 1 origin "$revision"
-        fi
-        echo "$revision" > "$root/.build-lock/$repo"
-    done
-fi
+# Shelf follows the selected branch for all three components. Record the exact
+# fetched revisions so retries and no-op checks describe what was actually built.
 for repo in android_translation_layer bionic_translation art_standalone; do
     echo "$repo $(cat "$root/.build-lock/$repo")"
 done > "$root/.build-lock/revisions"
 for repo in android_translation_layer bionic_translation art_standalone; do
     git -C "$workspace/$repo" checkout --detach "$(cat "$root/.build-lock/$repo")"
 done
-# An upstream commit can retain every patch addition while changing surrounding
-# context. Reverse-apply alone then wrongly labels the integrated fix incompatible.
-# Verify all added lines, including duplicate occurrences, in every affected file.
-patch_additions_present() {
-    python3 - "$patch_file" "$workspace/android_translation_layer" <<'PYTHON'
-import collections
-import pathlib
-import sys
-patch, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-required = {}
-path = None
-in_hunk = False
-for line in patch.read_text().splitlines():
-    if line.startswith('diff --git '):
-        path, in_hunk = None, False
-    elif line.startswith('+++ b/'):
-        path = line[6:]
-    elif line.startswith('@@ '):
-        in_hunk = True
-    elif in_hunk and path and line.startswith('+') and line[1:].strip():
-        required.setdefault(path, collections.Counter())[line[1:].strip()] += 1
-if not required:
-    sys.exit(1)
-for name, additions in required.items():
-    try:
-        actual = collections.Counter(line.strip() for line in (root / name).read_text().splitlines())
-    except (OSError, UnicodeError):
-        sys.exit(1)
-    if additions - actual:
-        sys.exit(1)
-PYTHON
-}
-if [ "$mode" = github ] && [ -s "$patch_file" ]; then
-    if git -C "$workspace/android_translation_layer" apply --check "$patch_file" 2>/dev/null; then
-        git -C "$workspace/android_translation_layer" apply "$patch_file"
-        cp "$patch_file" "$applied_patch"
-    elif git -C "$workspace/android_translation_layer" apply --reverse --check "$patch_file" 2>/dev/null || patch_additions_present; then
-        echo "ATL already includes the Shelf display patch; using upstream implementation."
-    else
-        echo "This ATL revision needs a newer Shelf display patch. Runtime was not rebuilt." >&2
-        exit 1
-    fi
-    sha256sum "$patch_file" | cut -d ' ' -f 1 >> "$root/.build-lock/revisions"
-fi
+# Current upstream owns display scaling. Do not inject the historical Shelf
+# patch or require its source text to remain unchanged as ATL evolves.
 # A setup recipe change must rebuild even when the three Git revisions match.
 sha256sum "$0" | cut -d ' ' -f 1 >> "$root/.build-lock/revisions"
 runtime_ready=true
@@ -166,6 +109,9 @@ if [ "$action" = update ] && [ "$runtime_ready" = true ] && [ -x "$build/android
 fi
 echo "Building runtime…"
 if [ "$mode" = github ]; then
+    # We intentionally build branch heads rather than dependency-lock.json pins.
+    # Both companion checkouts have already passed our strict cleanliness check.
+    export ATL_ALLOW_DEPENDENCY_CHANGES=1
     export ATL_WORKSPACE="$workspace" ATL_PREFIX="$prefix" ATL_BUILD_DIR="$build" JOBS="$jobs"
     mobile="$workspace/android_translation_layer/scripts/mobile"
     sh "$mobile/build.sh"

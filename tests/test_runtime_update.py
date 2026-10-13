@@ -43,6 +43,7 @@ set -eu
 root=$(dirname "$ATL_WORKSPACE")
 # Match ATL's companion validator, including untracked files.
 test -z "$(git -C "$ATL_WORKSPACE/art_standalone" status --porcelain)"
+test "$ATL_ALLOW_DEPENDENCY_CHANGES" = 1
 echo build >> "$root/build-count"
 test ! -f "$root/fail-build"
 mkdir -p "$ATL_BUILD_DIR"
@@ -60,19 +61,26 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
             self.git(self.workspace, 'clone', str(remote), repo)
             self.remotes[repo] = remote
 
-    def run_update(self, ok=True):
-        result = subprocess.run(['sh', str(SCRIPT), 'github', str(self.root), '1', 'update', str(getattr(self, 'patch_file', '/dev/null'))], capture_output=True, text=True)
+    def run_update(self, ok=True, action="update"):
+        result = subprocess.run(['sh', str(SCRIPT), 'github', str(self.root), '1', action, str(getattr(self, 'patch_file', '/dev/null'))], capture_output=True, text=True)
         self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
         return result.stdout
 
-    def test_update_noop_pins_failure_retry_and_edits(self):
+    def test_update_latest_heads_failure_retry_and_edits(self):
         self.run_update()
         self.assertIn('No compilation needed', self.run_update())
         self.assertEqual(len((self.root / 'build-count').read_text().splitlines()), 1)
-        # A companion branch moving must not override ATL's pinned version.
+        # Each companion follows main even when ATL's lock still names an older commit.
         remote = self.remotes['bionic_translation']
         (remote / 'source').write_text('new companion')
-        self.commit(remote)
+        revision = self.commit(remote)
+        self.run_update()
+        self.assertIn(revision, (self.root / 'built-revisions').read_text())
+        remote = self.remotes['art_standalone']
+        (remote / 'source').write_text('new ART')
+        revision = self.commit(remote)
+        self.run_update()
+        self.assertIn(revision, (self.root / 'built-revisions').read_text())
         self.assertIn('No compilation needed', self.run_update())
         remote = self.remotes['android_translation_layer']
         (remote / 'source').write_text('new ATL')
@@ -108,6 +116,15 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
         self.assertNotIn('No compilation needed', self.run_update())
         self.assertIn('No compilation needed', self.run_update())
         self.assertEqual(len((self.root / 'build-count').read_text().splitlines()), 2)
+
+    def test_setup_retry_fetches_latest_heads_in_existing_checkouts(self):
+        revisions = {}
+        for name, remote in self.remotes.items():
+            (remote / 'source').write_text('updated source for setup retry')
+            revisions[name] = self.commit(remote)
+        self.run_update(action='setup')
+        for name, revision in revisions.items():
+            self.assertEqual(self.git(self.workspace / name, 'rev-parse', 'HEAD'), revision)
 
     def test_existing_checkout_after_branch_rename(self):
         for repo in REPOS:
@@ -154,39 +171,36 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
         self.assertEqual(backups[0].read_text(), content)
         self.assertTrue(generated.read_text().endswith('original'))
 
-    def test_managed_runtime_patch_survives_updates_and_preserves_edits(self):
+    def test_legacy_managed_patch_is_removed_without_discarding_user_edits(self):
         repo = self.workspace / 'android_translation_layer'
         source = repo / 'source'
-        source.write_text('density fix')
-        self.patch_file = self.root / 'display.patch'
-        self.patch_file.write_text(self.git(repo, 'diff') + '\n')
-        self.git(repo, 'restore', 'source')
-        self.run_update()
-        self.assertEqual(source.read_text(), 'density fix')
-        self.assertIn('No compilation needed', self.run_update())
-        self.assertEqual(source.read_text(), 'density fix')
+        source.write_text('legacy density fix')
+        marker = self.root / 'applied-shelf.patch'
+        marker.write_text(self.git(repo, 'diff') + '\n')
         source.write_text('user modified managed patch')
         self.run_update(ok=False)
         self.assertEqual(source.read_text(), 'user modified managed patch')
+        self.assertTrue(marker.exists())
+        source.write_text('legacy density fix')
+        self.run_update()
+        self.assertEqual(source.read_text(), 'original')
+        self.assertFalse(marker.exists())
 
-    def test_integrated_patch_accepts_changed_context_but_not_missing_additions(self):
+    def test_upstream_display_changes_do_not_require_a_shelf_patch(self):
         remote = self.remotes['android_translation_layer']
-        baseline = 'before\nlegacy\nafter\n'
-        (remote / 'source').write_text(baseline)
-        self.commit(remote)
-        (remote / 'source').write_text('before\ndensity fix\nafter\n')
+        (remote / 'source').write_text('upstream display implementation')
+        revision = self.commit(remote)
         self.patch_file = self.root / 'display.patch'
-        self.patch_file.write_text(self.git(remote, 'diff') + '\n')
-        # Upstream retains the fix but rewrites adjacent code, breaking reverse apply.
-        (remote / 'source').write_text('new surrounding code\ndensity fix\nnew ending\n')
-        self.commit(remote)
-        self.assertIn('already includes', self.run_update())
+        self.patch_file.write_text('obsolete patch that cannot apply')
+        self.run_update()
+        self.assertIn(revision, (self.root / 'built-revisions').read_text())
         self.assertFalse((self.root / 'applied-shelf.patch').exists())
-        self.assertEqual(self.git(self.workspace / 'android_translation_layer', 'status', '--porcelain'), '')
-        self.assertIn('No compilation needed', self.run_update())
-        (remote / 'source').write_text('new surrounding code\nmissing fix\nnew ending\n')
-        self.commit(remote)
+
+    def test_companion_edits_are_not_allowed_with_latest_heads(self):
+        bionic = self.workspace / 'bionic_translation'
+        (bionic / 'new-source.cpp').write_text('user work')
         self.run_update(ok=False)
+        self.assertEqual((bionic / 'new-source.cpp').read_text(), 'user work')
 
     def test_lock_and_network_failure(self):
         (self.root / '.build-lock').mkdir()
