@@ -97,16 +97,34 @@ done
 # patch or require its source text to remain unchanged as ATL evolves.
 # A setup recipe change must rebuild even when the three Git revisions match.
 sha256sum "$0" | cut -d ' ' -f 1 >> "$root/.build-lock/revisions"
-runtime_ready=true
-if [ "$mode" = github ]; then
-    for artifact in "$prefix/lib/libart.so" "$prefix/lib/libart-compiler.so" "$prefix/share/art/core-all-hostdex.jar" "$prefix/libexec/atl-apk-verifier/run"; do
-        [ -s "$artifact" ] || runtime_ready=false
+runtime_complete() {
+    [ "$mode" != github ] && return 0
+    if [ ! -s "$prefix/native-libraries.txt" ]; then
+        echo "Missing private native-library inventory." >&2
+        return 1
+    fi
+    while IFS= read -r library; do
+        case "$library" in ''|*/*|*[!A-Za-z0-9._-]*) echo "Invalid native-library inventory." >&2; return 1 ;; esac
+        if [ ! -s "$prefix/lib/$library" ]; then
+            echo "Missing private runtime library: $library" >&2
+            return 1
+        fi
+    done < "$prefix/native-libraries.txt"
+    for artifact in "$prefix/lib/libart.so" "$prefix/lib/libart-compiler.so" "$prefix/lib/libutils.so" "$prefix/lib/libandroidfw.so" "$prefix/share/art/core-all-hostdex.jar" "$prefix/share/art/wolfssljni-hostdex.jar" "$prefix/libexec/atl-apk-verifier/run"; do
+        if [ ! -s "$artifact" ]; then
+            echo "Missing required runtime artifact: $artifact" >&2
+            return 1
+        fi
     done
-fi
+}
+runtime_ready=false
+if runtime_complete; then runtime_ready=true; fi
 if [ "$action" = update ] && [ "$runtime_ready" = true ] && [ -x "$build/android-translation-layer" ] && cmp -s "$root/.build-lock/revisions" "$root/built-revisions"; then
     echo "ATL is already up to date. No compilation needed."
     exit 0
 fi
+# Never retain a successful marker after a partial or failed rebuild.
+rm -f "$root/built-revisions"
 echo "Building runtime…"
 if [ "$mode" = github ]; then
     # We intentionally build branch heads rather than dependency-lock.json pins.
@@ -169,5 +187,6 @@ fi
 test -x "$workspace/android_translation_layer/build-mobile/android-translation-layer" || \
 	test -x "$workspace/android_translation_layer/builddir/android-translation-layer" || \
 	test -x "$prefix/bin/android-translation-layer"
+runtime_complete || { echo "Runtime build is incomplete." >&2; exit 1; }
 cp "$root/.build-lock/revisions" "$root/built-revisions"
 echo "Runtime build completed."

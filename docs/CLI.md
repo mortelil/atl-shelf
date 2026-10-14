@@ -157,3 +157,25 @@ These tests used process-local input/capture helpers, not physical keyboard
 input. Small editable text at high display density and missing Plexamp icon
 fonts remain visible limitations. The normal runtime paths do not reference
 those diagnostic helpers.
+
+### Installed APK metadata and runtime diagnostics
+
+Imports and replacements read `installedApk.packageId`, `installedApk.version`
+and `installedApk.versionCode` from the APK with `aapt`. Codes are strings to
+preserve large values. Local/APKMirror imports also populate the top-level
+`packageId`, `version` and `versionCode`. Remote release tracking remains separate
+from `installedApk`; a GitHub tag need not equal the APK version. Missing version
+names remain empty. Unreadable metadata produces `installedApk.warning` rather
+than an invented version; archive and architecture validation still apply.
+
+`doctor` includes `runtimeLibraries` for a GitHub runtime: expected and resolved
+private paths, file presence, and observed mappings in running managed apps.
+`selection: not-observed` means no mapping was observed, not that loading was
+verified. `mismatch` identifies a different loaded library. It never launches
+apps to collect this information.
+
+Runtime updates require private libart, libart-compiler, libutils and libandroidfw,
+both Java runtime JARs and the verifier. The shared build recipe records all
+published native libraries in `prefix/native-libraries.txt`; Shelf checks every
+entry, including transitive dependencies. Missing artifacts force rebuilding;
+a failed or incomplete build leaves no successful-build marker.

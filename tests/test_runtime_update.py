@@ -46,11 +46,13 @@ test -z "$(git -C "$ATL_WORKSPACE/art_standalone" status --porcelain)"
 test "$ATL_ALLOW_DEPENDENCY_CHANGES" = 1
 echo build >> "$root/build-count"
 test ! -f "$root/fail-build"
+mkdir -p "$ATL_PREFIX/share/art"
+printf wolf > "$ATL_PREFIX/share/art/wolfssljni-hostdex.jar"
 mkdir -p "$ATL_BUILD_DIR"
 printf '#!/bin/sh\\nexit 0\\n' > "$ATL_BUILD_DIR/android-translation-layer"
 chmod +x "$ATL_BUILD_DIR/android-translation-layer"
 ''')
-                (mobile / 'build-art-runtime.sh').write_text('#!/bin/sh\nset -eu\nmkdir -p "$ATL_PREFIX/lib"\nprintf art > "$ATL_PREFIX/lib/libart.so"\nprintf compiler > "$ATL_PREFIX/lib/libart-compiler.so"\n')
+                (mobile / 'build-art-runtime.sh').write_text('#!/bin/sh\nset -eu\nmkdir -p "$ATL_PREFIX/lib"\nprintf "libart.so\\nlibart-compiler.so\\nlibutils.so\\nlibandroidfw.so\\nlibbase.so\\n" > "$ATL_PREFIX/native-libraries.txt"\nprintf base > "$ATL_PREFIX/lib/libbase.so"\nprintf art > "$ATL_PREFIX/lib/libart.so"\nprintf compiler > "$ATL_PREFIX/lib/libart-compiler.so"\nprintf utils > "$ATL_PREFIX/lib/libutils.so"\nif test ! -f "$(dirname "$ATL_WORKSPACE")/omit-androidfw"; then printf framework > "$ATL_PREFIX/lib/libandroidfw.so"; fi\n')
                 (mobile / 'build-core-java.sh').write_text('#!/bin/sh\nset -eu\ntest -s "$R8_JAR"\ntest ! -f "$(dirname "$ATL_WORKSPACE")/fail-core"\nmkdir -p "$ATL_PREFIX/share/art"\nprintf core > "$ATL_PREFIX/share/art/core-all-hostdex.jar"\n')
                 (mobile / 'build-apk-verifier.sh').write_text('#!/bin/sh\nset -eu\nmkdir -p "$ATL_PREFIX/libexec/atl-apk-verifier"\nprintf \'#!/bin/sh\\nexit 0\\n\' > "$ATL_PREFIX/libexec/atl-apk-verifier/run"\nchmod +x "$ATL_PREFIX/libexec/atl-apk-verifier/run"\n')
                 (remote / '.gitignore').write_text('build-mobile/\n')
@@ -87,7 +89,7 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
         revision = self.commit(remote)
         (self.root / 'fail-build').touch()
         self.run_update(ok=False)
-        self.assertNotIn(revision, (self.root / 'built-revisions').read_text())
+        self.assertFalse((self.root / 'built-revisions').exists())
         (self.root / 'fail-build').unlink()
         self.run_update()
         self.assertIn(revision, (self.root / 'built-revisions').read_text())
@@ -107,6 +109,26 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
         self.assertTrue(core.exists())
         self.assertIn('No compilation needed', self.run_update())
         self.assertEqual(len((self.root / 'build-count').read_text().splitlines()), 3)
+
+    def test_missing_androidfw_repairs_and_incomplete_success_is_rejected(self):
+        self.run_update()
+        library = self.root / 'prefix/lib/libandroidfw.so'
+        self.assertTrue(library.exists())
+        library.unlink()
+        (self.root / 'omit-androidfw').touch()
+        self.run_update(ok=False)
+        self.assertFalse((self.root / 'built-revisions').exists())
+        (self.root / 'omit-androidfw').unlink()
+        self.run_update()
+        self.assertTrue(library.exists())
+        self.assertIn('No compilation needed', self.run_update())
+
+    def test_missing_transitive_library_rebuilds(self):
+        self.run_update()
+        (self.root / 'prefix/lib/libbase.so').unlink()
+        self.assertNotIn('No compilation needed', self.run_update())
+        self.assertTrue((self.root / 'prefix/lib/libbase.so').exists())
+        self.assertIn('No compilation needed', self.run_update())
 
     def test_old_recipe_metadata_does_not_skip_runtime_upgrade(self):
         self.run_update()

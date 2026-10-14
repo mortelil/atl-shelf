@@ -525,12 +525,29 @@ static bool resolveApkSource(const QJsonObject &o, ApkSourceResult *result) {
     if (!downloadApk(QUrl(asset.value("browser_download_url").toString()), expected, result)) return false;
     result->version = releaseVersion; return true;
 }
+// Read installed metadata from the actual staged APK, independent of release tags.
+static QJsonObject installedApkMetadata(const QString &path) {
+    QProcess process;
+    process.start("aapt", {"dump", "badging", path});
+    if (!process.waitForFinished(15000)) { process.kill(); process.waitForFinished(); }
+    const QString text = QString::fromUtf8(process.readAllStandardOutput());
+    const auto package = QRegularExpression("^package: name='([^']+)'([^\\n]*)").match(text);
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 || !package.hasMatch())
+        return {{"warning", "APK metadata could not be read with aapt."}};
+    const auto attributes = package.captured(2);
+    const auto name = QRegularExpression("versionName='([^']*)'").match(attributes);
+    const auto code = QRegularExpression("versionCode='([0-9]+)'").match(attributes);
+    QJsonObject metadata{{"packageId", package.captured(1)}, {"version", name.captured(1)}, {"versionCode", code.captured(1)}};
+    if (!code.hasMatch()) metadata["warning"] = "APK versionCode is missing or invalid.";
+    return metadata;
+}
 static bool stageAndActivate(QJsonObject &o, const QByteArray &bytes, QString *message) {
     if (requestCanceled && requestCanceled()) { *message = "Interrupted before activating the APK."; return false; }
     const QString dir = appDir(o); QDir().mkpath(dir);
     QFile staged(dir + "/app.apk.new");
     if (!staged.open(QIODevice::WriteOnly) || staged.write(bytes) != bytes.size()) { *message = "Could not write the APK file."; return false; }
     staged.close();
+    const auto metadata = installedApkMetadata(staged.fileName());
     const QString oldPath = apkPath(o) + ".old";
     QFile::remove(oldPath);
     const bool hadOld = QFile::exists(apkPath(o));
@@ -540,6 +557,12 @@ static bool stageAndActivate(QJsonObject &o, const QByteArray &bytes, QString *m
         *message = "Could not activate the new APK."; return false;
     }
     QFile::remove(oldPath);
+    o["installedApk"] = metadata;
+    if (o.value("source").toString() == "local" || o.value("source").toString() == "apkmirror") {
+        o["version"] = metadata.value("version").toString();
+        o["versionCode"] = metadata.value("versionCode").toString();
+        o["packageId"] = metadata.value("packageId").toString();
+    }
     extractAppIcon(o);
     return true;
 }

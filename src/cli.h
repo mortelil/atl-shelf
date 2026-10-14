@@ -59,6 +59,37 @@ static QJsonArray processes(const QJsonObject &entry) {
     }
     return result;
 }
+// Report observed mappings, not an inference from LD_LIBRARY_PATH alone.
+static QJsonArray runtimeLibraries(const QJsonObject &settings, const QJsonArray &entries) {
+    QJsonArray result;
+    if (settings.value("runtimeType").toString() != "github") return result;
+    const QString prefix = settings.value("runtimeEnv").toObject().value("ATL_PREFIX").toString(runtimeRoot()+"/github/prefix");
+    for (const auto &name : QStringList{"libart.so", "libart-compiler.so", "libutils.so", "libandroidfw.so"}) {
+        const QString expected = prefix+"/lib/"+name;
+        const QFileInfo info(expected);
+        QJsonArray observed;
+        bool mismatch = false;
+        for (const auto &entry : entries) for (const auto &pid : processes(entry.toObject())) {
+            QFile maps("/proc/"+QString::number(pid.toInt())+"/maps");
+            if (!maps.open(QIODevice::ReadOnly)) continue;
+            QSet<QString> paths;
+            for (const auto &line : maps.readAll().split('\n')) {
+                const int start = line.indexOf('/');
+                if (start < 0) continue;
+                const QString path = QString::fromUtf8(line.mid(start));
+                if (QFileInfo(path).fileName() != name || paths.contains(path)) continue;
+                paths.insert(path);
+                const bool matches = !info.canonicalFilePath().isEmpty() && QFileInfo(path).canonicalFilePath() == info.canonicalFilePath();
+                mismatch |= !matches;
+                observed.append(QJsonObject{{"pid",pid},{"path",path},{"matchesExpected",matches}});
+            }
+        }
+        result.append(QJsonObject{{"library",name},{"expectedPath",expected},{"resolvedPath",info.canonicalFilePath()},
+            {"present",info.isFile() && info.size()>0},{"observed",observed},
+            {"selection",mismatch ? "mismatch" : observed.isEmpty() ? "not-observed" : "private"}});
+    }
+    return result;
+}
 // ATL stores the launched APK's private files in <data root>/<APK filename>_.
 static bool clearPrivateData(const QJsonObject &entry, QString *error) {
     if (!processes(entry).isEmpty()) { *error = "Close the app before clearing its private data."; return false; }
@@ -219,7 +250,7 @@ static int shelfCli(QStringList arguments) {
         QJsonArray apps; for(const auto &v:entries) apps.append(inspect(v.toObject()));
         QJsonObject tools; for(const auto &tool:QStringList{"aapt","unzip","gpg","systemctl","kscreen-doctor","git","apk","doas","pkexec"}) tools[tool]=QStandardPaths::findExecutable(tool);
         const auto settings=readSettings();
-        return reply(true,QJsonObject{{"version","0.4.0"},{"dataDirectory",rootDir()},{"settingsPath",settingsFilePath()},{"runtime",settings},{"display",display()},{"apps",apps},{"tools",tools},{"runtimeExecutable",QFileInfo(settings.value("atl").toString()).isExecutable()},{"waylandDisplay",qEnvironmentVariable("WAYLAND_DISPLAY")},{"sessionBus",qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS")}});
+        return reply(true,QJsonObject{{"version","0.4.0"},{"dataDirectory",rootDir()},{"settingsPath",settingsFilePath()},{"runtime",settings},{"display",display()},{"apps",apps},{"tools",tools},{"runtimeLibraries",command=="doctor" ? runtimeLibraries(settings,entries) : QJsonArray()},{"runtimeExecutable",QFileInfo(settings.value("atl").toString()).isExecutable()},{"waylandDisplay",qEnvironmentVariable("WAYLAND_DISPLAY")},{"sessionBus",qEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS")}});
     }
     if(command=="list") { QJsonArray result; for(const auto &v:entries) result.append(inspect(v.toObject())); return reply(true,result); }
     if(command=="settings") {
@@ -292,7 +323,8 @@ static int shelfCli(QStringList arguments) {
         else { QFile file(value); if(!file.open(QIODevice::ReadOnly)) return reply(false,{},"Could not read APK."); result.bytes=file.readAll(); if(!apkMatchesHostArchitecture(result.bytes)) return reply(false,{},"Invalid or incompatible APK."); }
         if(interrupted) return reply(false,{},"Interrupted.",130);
         if(!stageAndActivate(entry,result.bytes,&error)) return reply(false,{},error);
-        saveAppIcon(entry,result.iconBytes); entry["version"]=result.version; entry["versionCode"]=result.versionCode; entry["fdroidLatestCode"]=result.latestCode;
+        saveAppIcon(entry,result.iconBytes);
+        if(source=="github" || source=="fdroid") { entry["version"]=result.version; entry["versionCode"]=result.versionCode; entry["fdroidLatestCode"]=result.latestCode; }
         entries.append(entry); if(!writeApps(entries)) { QDir(appDir(entry)).removeRecursively(); return reply(false,{},"Cannot save app library."); }
         updateDesktop(entry,{});
         if(entry.value("daily").toBool() && !writeTimer(entry,true,&error)) { entry["daily"]=false; entry["updateError"]=error; entries[entries.size()-1]=entry; writeApps(entries); return reply(false,inspect(entry),"App installed, but daily updates could not be enabled: "+error); }
@@ -338,8 +370,9 @@ static int shelfCli(QStringList arguments) {
         QFile file(options.value("--apk")); if(!file.open(QIODevice::ReadOnly)) return reply(false,{},"Provide a readable --apk file.",2);
         const auto bytes=file.readAll(); if(!apkMatchesHostArchitecture(bytes)) return reply(false,{},"Invalid or incompatible APK.");
         QString error; if(!stageAndActivate(entry,bytes,&error)) return reply(false,{},error);
-        entry["updatedAt"]=QDateTime::currentDateTime().toString(Qt::ISODate); entry["version"]="manually replaced";
-        entry.remove("versionCode"); entry.remove("fdroidLatestCode"); entries[index]=entry;
+        entry["updatedAt"]=QDateTime::currentDateTime().toString(Qt::ISODate); entry["version"]=entry.value("installedApk").toObject().value("version").toString();
+        entry["versionCode"]=entry.value("installedApk").toObject().value("versionCode").toString();
+        entry.remove("fdroidLatestCode"); entries[index]=entry;
         if(!writeApps(entries)) return reply(false,{},"APK replaced, but metadata could not be saved.");
         updateDesktop(entry,{}); return reply(true,inspect(entry));
     }

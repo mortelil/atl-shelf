@@ -81,6 +81,55 @@ class CliTest(unittest.TestCase):
         self.assertNotIn('ATL_CORE_JAR', env)
         self.assertNotIn('LD_PRELOAD', env)
 
+    def test_local_apk_metadata_and_replacement(self):
+        def badging(version, code):
+            self.exe('aapt', "#!/bin/sh\nprintf \"package: name='test.fixture' versionCode='" + code + "' versionName='" + version + "'\\n\"\n")
+        badging('1.18.2', '4294967296')
+        entry = self.install('metadata', '--name', 'My custom name')
+        self.assertEqual(entry['version'], '1.18.2')
+        self.assertEqual(entry['versionCode'], '4294967296')
+        self.assertEqual(entry['packageId'], 'test.fixture')
+        private = Path(entry['dataDirectory']) / 'app.apk_'
+        private.mkdir()
+        (private / 'synthetic.txt').write_text('preserve me')
+        badging('2.0', '4294967297')
+        entry = self.call('replace', 'metadata', '--apk', str(self.apk))[0]
+        self.assertEqual(entry['version'], '2.0')
+        self.assertEqual(entry['versionCode'], '4294967297')
+        self.assertEqual(entry['name'], 'My custom name')
+        self.assertEqual((private / 'synthetic.txt').read_text(), 'preserve me')
+        self.assertEqual(self.call('show', 'metadata')[0]['version'], '2.0')
+        self.assertEqual(self.call('list')[0][0]['versionCode'], '4294967297')
+        badging('', '3')
+        self.assertEqual(self.call('replace', 'metadata', '--apk', str(self.apk))[0]['version'], '')
+        self.exe('aapt', '#!/bin/sh\necho malformed\n')
+        entry = self.call('replace', 'metadata', '--apk', str(self.apk))[0]
+        self.assertEqual(entry['version'], '')
+        self.assertIn('warning', entry['installedApk'])
+        self.apk.write_bytes(b'not an apk')
+        self.call('replace', 'metadata', '--apk', str(self.apk), code=5)
+
+    def test_metadata_import_keeps_architecture_rejection(self):
+        wrong = 'x86_64' if os.uname().machine == 'aarch64' else 'arm64-v8a'
+        with zipfile.ZipFile(self.apk, 'w') as apk:
+            apk.writestr('AndroidManifest.xml', '<manifest/>')
+            apk.writestr('lib/' + wrong + '/libexample.so', 'fixture')
+        self.call('install', '--source', 'local', '--value', str(self.apk), '--id', 'wrong', code=5)
+        self.assertEqual(self.call('list')[0], [])
+
+    def test_doctor_reports_missing_private_androidfw(self):
+        self.call('settings', '--set', '{"runtimeType":"github"}')
+        libraries = self.call('doctor')[0]['runtimeLibraries']
+        fw = next(lib for lib in libraries if lib['library'] == 'libandroidfw.so')
+        self.assertFalse(fw['present'])
+        self.assertEqual(fw['selection'], 'not-observed')
+        path = Path(fw['expectedPath'])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('fixture')
+        fw = next(lib for lib in self.call('doctor')[0]['runtimeLibraries'] if lib['library'] == 'libandroidfw.so')
+        self.assertTrue(fw['present'])
+        self.assertEqual(fw['observed'], [])
+
     def test_clear_private_data_preserves_install_and_other_files(self):
         entry = self.install()
         root = Path(entry['dataDirectory'])
