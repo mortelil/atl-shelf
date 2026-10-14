@@ -188,8 +188,10 @@ public:
     void setValue(int value) { bar->setValue(value); }
 };
 static bool (*requestCanceled)() = nullptr;
-static QByteArray httpGet(const QUrl &url, int *status = nullptr, bool html = false) {
-    if (transferDialog && transferDialog->wasCanceled()) { if (status) *status = 0; return {}; }
+static bool downloadCanceled() { return (transferDialog && transferDialog->wasCanceled()) || (requestCanceled && requestCanceled()); }
+static QByteArray httpGet(const QUrl &url, int *status = nullptr, bool html = false, QString *error = nullptr, int initialTimeout = 60000) {
+    if (error) error->clear();
+    if (downloadCanceled()) { if (status) *status = 0; if (error) *error = "Download canceled."; return {}; }
     QNetworkAccessManager manager;
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::UserAgentHeader, html
@@ -201,7 +203,8 @@ static QByteArray httpGet(const QUrl &url, int *status = nullptr, bool html = fa
     QNetworkReply *reply = manager.get(req);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     QTimer timer; timer.setSingleShot(true);
-    QObject::connect(&timer, &QTimer::timeout, reply, &QNetworkReply::abort);
+    bool timedOut = false;
+    QObject::connect(&timer, &QTimer::timeout, reply, [&] { timedOut = true; reply->abort(); });
     QObject::connect(reply, &QNetworkReply::downloadProgress, &loop, [&](qint64 received, qint64 total) {
         timer.start(60000); // Inactivity timeout; large APKs may take longer overall.
         if (transferDialog) {
@@ -213,10 +216,43 @@ static QByteArray httpGet(const QUrl &url, int *status = nullptr, bool html = fa
     if (transferDialog) QObject::connect(transferDialog, &QDialog::rejected, reply, &QNetworkReply::abort);
     QTimer cancelPoll;
     if (requestCanceled) { QObject::connect(&cancelPoll, &QTimer::timeout, reply, [reply] { if (requestCanceled()) reply->abort(); }); cancelPoll.start(100); }
-    timer.start(60000); loop.exec();
+    timer.start(initialTimeout); loop.exec();
     if (status) *status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QByteArray bytes = reply->error() == QNetworkReply::NoError ? reply->readAll() : QByteArray();
+    if (error && (reply->error() != QNetworkReply::NoError || bytes.isEmpty()))
+        *error = downloadCanceled() ? "Download canceled." : timedOut ? "Connection timed out." : reply->error() != QNetworkReply::NoError ? reply->errorString() : "The server returned an empty response.";
     reply->deleteLater(); return bytes;
+}
+// Transport mirrors never replace the pinned signing key or signed file hashes.
+static QString preferredFdroidRepository = "https://f-droid.org/repo";
+static QStringList fdroidRepositories() {
+    QStringList repos{preferredFdroidRepository, "https://f-droid.org/repo", "https://ftp.fau.de/fdroid/repo"};
+    repos.removeDuplicates();
+    return repos;
+}
+static QByteArray fetchFromRepositories(const QString &path, const QStringList &repos, int *status,
+                                       QString *error, const QString &digest = {}, QString *selected = nullptr) {
+    QStringList errors;
+    for (const auto &repo : repos) {
+        if (downloadCanceled()) { if (error) *error = "Download canceled."; return {}; }
+        QString detail;
+        const auto bytes = httpGet(QUrl(repo+path), status, false, &detail, 15000);
+        if (downloadCanceled()) { if (error) *error = "Download canceled."; return {}; }
+        if (*status == 200 && !bytes.isEmpty()) {
+            if (digest.isEmpty() || QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex() == digest.toLower().toLatin1()) {
+                if (selected) *selected = repo;
+                return bytes;
+            }
+            detail = "SHA-256 verification failed; file rejected.";
+        }
+        if (detail.isEmpty()) detail = "HTTP " + QString::number(*status);
+        errors << QUrl(repo).host() + ": " + detail;
+    }
+    if (error) *error = errors.join("\n");
+    return {};
+}
+static QByteArray fdroidGet(const QString &path, int *status, QString *error = nullptr, const QString &digest = {}) {
+    return fetchFromRepositories(path, fdroidRepositories(), status, error, digest, &preferredFdroidRepository);
 }
 struct ApkSourceResult { QByteArray bytes; QByteArray iconBytes; QString version; QString versionCode; QString latestCode; QString message; };
 
@@ -290,8 +326,10 @@ static QJsonObject bestGithubAsset(const QJsonObject &release, QString *why = nu
     return best;
 }
 static bool downloadApk(const QUrl &url, const QString &expectedDigest, ApkSourceResult *out) {
-    int status = 0; const QByteArray bytes = httpGet(url, &status);
-    if (status != 200 || bytes.size() < 100 || !bytes.startsWith("PK")) { out->message = "Download failed, or the file is not a valid APK."; return false; }
+    int status = 0; QString detail;
+    const bool fdroid = url.host() == "f-droid.org" && url.path().startsWith("/repo/");
+    const QByteArray bytes = fdroid ? fdroidGet(url.path().mid(5), &status, &detail, expectedDigest) : httpGet(url, &status, false, &detail);
+    if (status != 200 || bytes.size() < 100 || !bytes.startsWith("PK")) { out->message = detail.isEmpty() ? "Download failed, or the file is not a valid APK." : detail; return false; }
     const QByteArray hash = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
     if (!expectedDigest.isEmpty() && expectedDigest.toLatin1().toLower() != hash) { out->message = "SHA-256 verification failed. The APK was not installed."; return false; }
     if (!apkMatchesHostArchitecture(bytes)) { out->message = "This APK is invalid or does not support " + QSysInfo::currentCpuArchitecture() + "."; return false; }
@@ -303,10 +341,21 @@ static QJsonDocument verifiedFdroidIndex(QString *message) {
     const QString expectedSigner = "802A9799016112346E1FEFF47A029E54DD5DCE7A";
     const QString expectedPrimary = "37D2C98789D8311948394E3E41E7044E1DBA2E89";
     int status = 0;
-    const QByteArray entryBytes = httpGet(QUrl("https://f-droid.org/repo/entry.json"), &status);
-    if (status != 200 || entryBytes.isEmpty()) { *message = "Could not fetch F-Droid's signed entry.json (HTTP " + QString::number(status) + ")."; return {}; }
-    const QByteArray signatureBytes = httpGet(QUrl("https://f-droid.org/repo/entry.json.asc"), &status);
-    if (status != 200 || signatureBytes.isEmpty()) { *message = "Could not fetch the F-Droid signature for entry.json."; return {}; }
+    QByteArray entryBytes, signatureBytes;
+    QStringList errors;
+    for (const auto &repo : fdroidRepositories()) {
+        QString detail;
+        entryBytes = httpGet(QUrl(repo+"/entry.json"), &status, false, &detail, 15000);
+        if (status == 200 && !entryBytes.isEmpty()) {
+            // Fetch the entry and its signature from the same repository snapshot.
+            signatureBytes = httpGet(QUrl(repo+"/entry.json.asc"), &status, false, &detail, 15000);
+            if (status == 200 && !signatureBytes.isEmpty()) { preferredFdroidRepository = repo; break; }
+        }
+        entryBytes.clear(); signatureBytes.clear();
+        if (downloadCanceled()) { *message = "Download canceled."; return {}; }
+        errors << QUrl(repo).host()+": "+(detail.isEmpty() ? "HTTP "+QString::number(status) : detail);
+    }
+    if (entryBytes.isEmpty() || signatureBytes.isEmpty()) { *message = "Could not fetch F-Droid's signed index entry.\n"+errors.join("\n"); return {}; }
 
     QTemporaryDir temp;
     if (!temp.isValid()) { *message = "Could not create a temporary directory for signature verification."; return {}; }
@@ -355,9 +404,9 @@ static QJsonDocument verifiedFdroidIndex(QString *message) {
     if (cache.open(QIODevice::ReadOnly)) indexBytes = cache.readAll();
     auto hashMatches = [&] { return !indexBytes.isEmpty() && QCryptographicHash::hash(indexBytes, QCryptographicHash::Sha256).toHex() == expectedHash.toLatin1(); };
     if (!hashMatches()) {
-        const QUrl indexUrl("https://f-droid.org/repo" + indexName);
-        indexBytes = httpGet(indexUrl, &status);
-        if (status != 200 || !hashMatches()) { *message = status != 200 ? "Could not fetch the F-Droid index (HTTP " + QString::number(status) + ")." : "The F-Droid index SHA-256 does not match the signed entry.json; the file was rejected."; return {}; }
+        QString detail;
+        indexBytes = fdroidGet(indexName, &status, &detail, expectedHash);
+        if (status != 200 || !hashMatches()) { *message = "Could not fetch the verified F-Droid index.\n" + detail; return {}; }
         QDir().mkpath(QFileInfo(cachePath).absolutePath());
         QSaveFile saved(cachePath);
         if (saved.open(QIODevice::WriteOnly) && saved.write(indexBytes) == indexBytes.size()) saved.commit();
@@ -376,7 +425,7 @@ static QByteArray fdroidIcon(const QJsonObject &package, QString *message) {
     const QString digest = icon.value("sha256").toString().toLower();
     if (!name.startsWith('/') || name.contains("..") || !QRegularExpression("^[a-f0-9]{64}$").match(digest).hasMatch()) return {};
     int status = 0;
-    const QByteArray bytes = httpGet(QUrl("https://f-droid.org/repo" + name), &status);
+    const QByteArray bytes = fdroidGet(name, &status, nullptr, digest);
     if (status != 200 || bytes.size() < 8 || !bytes.startsWith(QByteArray::fromHex("89504e470d0a1a0a")) ||
         QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex() != digest.toLatin1()) {
         if (message) *message = "The signed F-Droid app icon could not be downloaded or verified.";
@@ -1369,6 +1418,7 @@ private:
 };
 
 #ifdef ATL_SHELF_TESTING
+QByteArray mirrorsForTests(const QStringList &repos, const QString &digest, QString *error) { int status=0; return fetchFromRepositories("/file",repos,&status,error,digest); }
 QWidget *createShelfForTests() { return new Shelf; }
 QWidget *currentPageForTests() { return mobileHost ? mobileHost->currentWidget() : nullptr; }
 QByteArray fetchForTests(const QUrl &url, QWidget *parent) { TransferProgress progress("Downloading…", parent); return httpGet(url); }

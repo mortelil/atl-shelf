@@ -179,3 +179,10 @@ both Java runtime JARs and the verifier. The shared build recipe records all
 published native libraries in `prefix/native-libraries.txt`; Shelf checks every
 entry, including transitive dependencies. Missing artifacts force rebuilding;
 a failed or incomplete build leaves no successful-build marker.
+
+F-Droid downloads fall back from the main repository to the FAU mirror when a
+server is unavailable. The entry and detached signature come from the same
+repository, and the pinned signing key and signed SHA-256 checks remain required.
+The selected mirror is reused for index, icon and APK downloads in that process.
+Connection failures report the underlying network error instead of “HTTP 0”.
+FAU is listed in [F-Droid's mirror documentation](https://f-droid.org/docs/Running_a_Mirror/).

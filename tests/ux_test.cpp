@@ -23,6 +23,8 @@
 #include <QScrollBar>
 #include <QScopeGuard>
 #include <QTcpServer>
+#include <QTcpSocket>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <memory>
 #include <QLocalServer>
@@ -30,6 +32,7 @@
 #include "../src/apk_icon.h"
 #include "../src/mobile_ui.h"
 
+QByteArray mirrorsForTests(const QStringList &, const QString &, QString *);
 QWidget *createShelfForTests();
 QWidget *currentPageForTests();
 QByteArray fetchForTests(const QUrl &, QWidget *);
@@ -235,6 +238,38 @@ private slots:
         QApplication::sendEvent(&query,&composing);
         QCOMPARE(query.submittedText(),QString("secure signal"));
         query.setText("new query"); QCOMPARE(query.submittedText(),QString("new query"));
+    }
+    void mirrorFallbackVerifiesHashes() {
+        QTcpServer first, second;
+        QVERIFY(first.listen(QHostAddress::LocalHost));
+        QVERIFY(second.listen(QHostAddress::LocalHost));
+        QByteArray firstBody="untrusted", secondBody="verified content";
+        int firstStatus=503, hits=0;
+        auto serve = [&](QTcpServer &server, QByteArray &body, bool primary) {
+            connect(&server,&QTcpServer::newConnection,this,[&,primary,serverPtr=&server,bodyPtr=&body] {
+                auto *socket=serverPtr->nextPendingConnection();
+                connect(socket,&QTcpSocket::readyRead,socket,[&,socket,primary,bodyPtr] {
+                    socket->readAll(); ++hits;
+                    const auto payload=*bodyPtr;
+                    socket->write("HTTP/1.1 "+QByteArray::number(primary ? firstStatus : 200)+" Response\r\nContent-Length: "+QByteArray::number(payload.size())+"\r\nConnection: close\r\n\r\n"+payload);
+                    socket->disconnectFromHost();
+                });
+                connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
+            });
+        };
+        serve(first,firstBody,true); serve(second,secondBody,false);
+        const QStringList repos{"http://127.0.0.1:"+QString::number(first.serverPort()),"http://127.0.0.1:"+QString::number(second.serverPort())};
+        const QString digest=QCryptographicHash::hash(secondBody,QCryptographicHash::Sha256).toHex();
+        QString error;
+        QCOMPARE(mirrorsForTests(repos,digest,&error),secondBody);
+        QCOMPARE(hits,2);
+        firstStatus=200; hits=0; // A successful HTTP response with the wrong hash is rejected.
+        QCOMPARE(mirrorsForTests(repos,digest,&error),secondBody);
+        QCOMPARE(hits,2);
+        secondBody="also untrusted";
+        QVERIFY(mirrorsForTests(repos,digest,&error).isEmpty());
+        QVERIFY(error.contains("SHA-256 verification failed"));
+        QVERIFY(!error.contains("HTTP 0"));
     }
     void cancelNetworkTransfer() {
         QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
