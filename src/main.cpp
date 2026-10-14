@@ -146,18 +146,31 @@ static QString desktopQuote(QString s) {
 static QString desktopPath() {
     return QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation);
 }
-static void updateDesktop(const QJsonObject &o, const QString &atl) {
+static bool updateDesktop(const QJsonObject &o, const QString &atl) {
+    static QStringList pendingRefresh;
     QDir().mkpath(desktopPath()); QDir().mkpath(appDir(o));
     Q_UNUSED(atl);
     const QString exec = desktopQuote(QCoreApplication::applicationFilePath()) + " --launch " + desktopQuote(o.value("id").toString());
-    QFile f(desktopPath() + "/atl-shelf-" + o.value("id").toString() + ".desktop");
-    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        const QString contents = "[Desktop Entry]\nType=Application\nName=" + o.value("name").toString().replace("\n", " ") +
-          "\nComment=Android app via ATL\nExec=" + exec + "\n" +
-          "Icon=" + (o.value("icon").toString().isEmpty() ? "application-x-apk" : o.value("icon").toString()) +
-          "\nTerminal=false\nCategories=Utility;\n";
-        f.write(contents.toUtf8()); f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+    const QString path = desktopPath() + "/atl-shelf-" + o.value("id").toString() + ".desktop";
+    const QByteArray contents = ("[Desktop Entry]\nType=Application\nName=" + o.value("name").toString().replace("\n", " ") +
+        "\nComment=Android app via ATL\nExec=" + exec + "\n" +
+        "Icon=" + (o.value("icon").toString().isEmpty() ? "application-x-apk" : o.value("icon").toString()) +
+        "\nTerminal=false\nCategories=Utility;\n").toUtf8();
+    QFile previous(path);
+    if (previous.open(QIODevice::ReadOnly) && previous.readAll() == contents && !pendingRefresh.contains(path)) return true;
+    previous.close();
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(contents) != contents.size() || !file.commit()) return false;
+    QFile::setPermissions(path,QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+    // Refresh only changed shortcuts, after the complete file is visible to KDE.
+    const QString cacheBuilder = QStandardPaths::findExecutable("kbuildsycoca6");
+    if (!cacheBuilder.isEmpty()) {
+        QProcess refresh; refresh.setProgram(cacheBuilder); refresh.setArguments({"--noincremental"});
+        refresh.setStandardOutputFile(QProcess::nullDevice()); refresh.setStandardErrorFile(QProcess::nullDevice());
+        if (!refresh.startDetached()) { if (!pendingRefresh.contains(path)) pendingRefresh.append(path); return false; }
     }
+    pendingRefresh.removeAll(path);
+    return true;
 }
 static QString safeId(QString s) {
     s = s.toLower(); s.replace(QRegularExpression("[^a-z0-9_-]+"), "-");
@@ -779,7 +792,7 @@ public:
         auto *advanced = new QWidget(); auto *advancedLayout = new QVBoxLayout(advanced); advancedLayout->setContentsMargins(0, 0, 0, 0); advanced->hide();
         connect(advancedToggle, &QPushButton::toggled, advanced, &QWidget::setVisible);
         auto *runGroup = new QGroupBox("App settings"); auto *runForm = new QFormLayout(runGroup);
-        name = new QLineEdit(); activity = new QLineEdit(); activity->setPlaceholderText("Optional, e.g. com/example/MainActivity");
+        name = new MobileSearchEdit(); name->setObjectName("appName"); activity = new QLineEdit(); activity->setPlaceholderText("Optional, e.g. com/example/MainActivity");
         width = new QLineEdit("720"); height = new QLineEdit("1280"); width->setValidator(new QIntValidator(200, 4096, width)); height->setValidator(new QIntValidator(200, 4096, height));
         auto *resolution = new QHBoxLayout(); resolution->addWidget(width); resolution->addWidget(new QLabel("×")); resolution->addWidget(height); resolution->addStretch();
         auto *resolutionWidget = new QWidget(); resolutionWidget->setLayout(resolution);
@@ -793,9 +806,9 @@ public:
         workingDirectory = new QLineEdit(); workingDirectory->setPlaceholderText("Optional working directory");
         launchEnvironment = new QPlainTextEdit(); launchEnvironment->setPlaceholderText("KEY=value (one per line)"); launchEnvironment->setMaximumHeight(112);
         launchForm->addRow("Working directory", workingDirectory); launchForm->addRow("Environment", launchEnvironment); advancedLayout->addWidget(launchGroup);
-        auto *buttons = new QHBoxLayout(); auto *launch = new QPushButton("Launch app"); checkButton = new QPushButton("Update app"); auto *save = new QPushButton("Save settings");
+        auto *buttons = new QHBoxLayout(); auto *launch = new QPushButton("Launch app"); checkButton = new QPushButton("Update app"); saveButton = new QPushButton("Save"); auto *save = saveButton; save->setObjectName("saveAppSettings"); save->setProperty("primary", true); save->setFocusPolicy(Qt::NoFocus);
         launch->hide(); buttons->addWidget(checkButton); detailLayout->addLayout(buttons);
-        advancedLayout->addWidget(save); detailLayout->addWidget(advancedToggle); detailLayout->addWidget(advanced);
+        detailLayout->addWidget(advancedToggle); detailLayout->addWidget(advanced);
         auto *diagnostics = new QPushButton("View launch log"); detailLayout->addWidget(diagnostics);
         connect(diagnostics, &QPushButton::clicked, this, [this]{ showLaunchLog(); });
         detailLayout->addStretch();
@@ -804,7 +817,16 @@ public:
         auto *remove = new QPushButton("Remove app…"); remove->setStyleSheet("color: #b3261e;"); detailLayout->addWidget(remove);
         detailScroll->setWidget(detailPage);
         auto *detailContainer = new QWidget; auto *detailContainerLayout = new QVBoxLayout(detailContainer); detailContainerLayout->setContentsMargins(0,0,0,0);
-        detailContainerLayout->addWidget(detailScroll,1); detailContainerLayout->addWidget(open); pages->addWidget(detailContainer);
+        detailContainerLayout->addWidget(detailScroll,1);
+        saveFeedback = new QLabel; saveFeedback->setObjectName("saveFeedback"); saveFeedback->setWordWrap(true); saveFeedback->setTextFormat(Qt::PlainText);
+        detailContainerLayout->addWidget(saveFeedback);
+        auto *detailActions = new QHBoxLayout; detailActions->addWidget(open,1); detailActions->addWidget(save,1);
+        detailContainerLayout->addLayout(detailActions); pages->addWidget(detailContainer);
+        auto edited = [this] { saveButton->setText("Save"); saveFeedback->setText("Unsaved changes"); };
+        for (auto *edit : QList<QLineEdit *>{name, activity, width, height, workingDirectory}) connect(edit,&QLineEdit::textChanged,this,edited);
+        connect(launchEnvironment,&QPlainTextEdit::textChanged,this,edited);
+        connect(fitScreen,&QCheckBox::toggled,this,edited);
+        connect(dailyCheck,&QCheckBox::toggled,this,edited);
         connect(back, &QPushButton::clicked, this, [this]{ pages->setCurrentIndex(0); });
         connect(launch, &QPushButton::clicked, this, [this]{ launchSelected(); });
         connect(checkButton, &QPushButton::clicked, this, [this]{ checkSelected(); });
@@ -870,7 +892,7 @@ private:
         writeApps(installed);
     }
     QLabel *welcome; QPushButton *prepareButton; QLineEdit *librarySearch;
-    QLineEdit *atlPath, *name, *activity, *width, *height, *workingDirectory; QPlainTextEdit *launchEnvironment; QListWidget *appsList; QLineEdit *selectedTitle; QLabel *status, *sourceLabel, *runtimeStatus; QCheckBox *dailyCheck, *fitScreen; QPushButton *checkButton; QStackedWidget *pages; QJsonArray apps;
+    MobileSearchEdit *name; QLabel *saveFeedback; QPushButton *saveButton; QLineEdit *atlPath, *activity, *width, *height, *workingDirectory; QPlainTextEdit *launchEnvironment; QListWidget *appsList; QLineEdit *selectedTitle; QLabel *status, *sourceLabel, *runtimeStatus; QCheckBox *dailyCheck, *fitScreen; QPushButton *checkButton; QStackedWidget *pages; QJsonArray apps;
     void loadLatestForAction() {
         const QString id = selectedRow >= 0 && selectedRow < apps.size() ? apps[selectedRow].toObject().value("id").toString() : QString();
         apps = readApps(); selectedRow = -1;
@@ -1158,12 +1180,12 @@ private:
         const bool canAutoUpdate = source == "github" || source == "fdroid";
         dailyCheck->setChecked(o.value("daily").toBool()); dailyCheck->setEnabled(canAutoUpdate); checkButton->setEnabled(canAutoUpdate);
         QString version = o.value("version").toString(); if (version.isEmpty()) version = "Unknown version";
-        status->setText("Installed · " + version + (o.value("updateError").toString().isEmpty() ? QString() : "\nAutomatic updates need attention. Save app settings to retry.")); pages->setCurrentIndex(1);
+        status->setText("Installed · " + version + (o.value("updateError").toString().isEmpty() ? QString() : "\nAutomatic updates need attention. Save app settings to retry.")); saveFeedback->clear(); saveButton->setText("Save"); pages->setCurrentIndex(1);
     }
     void saveDetails() {
         auto lock = lockLibrary(this); if (!lock) return; loadLatestForAction();
         int row = selected(); if (row < 0 || row >= apps.size()) return;
-        QJsonObject o = apps[row].toObject(); o["name"] = name->text().trimmed(); o["activity"] = activity->text().trimmed();
+        QJsonObject o = apps[row].toObject(); o["name"] = name->submittedText().trimmed(); o["activity"] = activity->text().trimmed();
         QJsonObject launchEnv;
         for (const QString &line : launchEnvironment->toPlainText().split('\n')) {
             const int equals = line.indexOf('=');
@@ -1181,11 +1203,16 @@ private:
         if (o.value("name").toString().isEmpty()) { mobileNotice(this, "Name required", "Enter a name for the app."); return; }
         apps[row] = o;
         if (!writeApps(apps)) { mobileNotice(this, "Save failed", "Could not save the app settings."); return; }
-        updateDesktop(o, atlPath->text()); QString why;
+        const bool menuUpdated = updateDesktop(o, atlPath->text()); QString why;
         if (!writeTimer(o, o.value("daily").toBool(), &why) && o.value("daily").toBool()) {
             o["daily"] = false; o["updateError"] = why; dailyCheck->setChecked(false); status->setText("Settings saved. Automatic updates could not be enabled.\n" + why);
         } else { o.remove("updateError"); status->setText("Settings saved."); }
         apps[row] = o; writeApps(apps);
+        name->setText(o.value("name").toString());
+        saveButton->setText("Saved");
+        saveFeedback->setText(!menuUpdated ? "Settings saved, but the app-menu shortcut could not be updated. Try Save again." :
+            o.contains("updateError") ? "Settings saved. Automatic updates need attention." : "Changes saved");
+        QGuiApplication::inputMethod()->hide();
         selectedTitle->setText(o.value("name").toString()); selectedTitle->setCursorPosition(0); reload();
     }
     void launchSelected() {

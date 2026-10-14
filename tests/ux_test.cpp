@@ -67,17 +67,49 @@ private slots:
         QTest::mouseClick(library->viewport(), Qt::LeftButton, Qt::NoModifier, library->visualItemRect(library->item(0)).center());
         QCOMPARE(w->findChild<QStackedWidget *>("pages")->currentIndex(), 1);
         QVERIFY(button(w.get(), "Open app")->isVisible());
-        QVERIFY(!button(w.get(), "Save settings")->isVisible());
+        QVERIFY(button(w.get(), "Save")->isVisible());
         QTest::qWait(100); QCOMPARE(w->findChild<QScrollArea *>()->horizontalScrollBar()->maximum(), 0);
         w->grab().save("/tmp/shelf-detail.png");
         QCOMPARE(w->findChild<QPushButton *>("mainBack")->mapTo(w.get(), QPoint(0,0)), QPoint(18,16));
         button(w.get(), "App settings ▾")->click();
-        button(w.get(), "Save settings")->click();
+        button(w.get(), "Save")->click();
         button(w.get(), "Open app")->click();
         QTRY_VERIFY(QFile::exists(dataRoot + "/launched"));
         QFile launch(dataRoot + "/launched"); QVERIFY(launch.open(QIODevice::ReadOnly)); QVERIFY(launch.readAll().contains("apps/immich/app.apk"));
         button(w.get(), "Settings")->click(); QCOMPARE(w->findChild<QStackedWidget *>("pages")->currentIndex(), 2);
         QVERIFY(button(w.get(), "Look for ATL updates")->isVisible());
+    }
+    void renameHasStickySaveAndUpdatesMenu() {
+        std::unique_ptr<QWidget> w(createShelfForTests()); w->resize(360,740); w->show(); QTest::qWait(80);
+        auto *library=w->findChild<QListWidget *>("library");
+        QTest::mouseClick(library->viewport(),Qt::LeftButton,Qt::NoModifier,library->visualItemRect(library->item(0)).center());
+        button(w.get(),"App settings ▾")->click();
+        auto *name=w->findChild<QLineEdit *>("appName"); QVERIFY(name);
+        auto *save=w->findChild<QPushButton *>("saveAppSettings"); QVERIFY(save);
+        auto *feedback=w->findChild<QLabel *>("saveFeedback"); QVERIFY(feedback);
+        const QPoint position=save->mapTo(w.get(),QPoint(0,0));
+        auto *scroll=name->parentWidget();
+        while(scroll && !qobject_cast<QScrollArea *>(scroll)) scroll=scroll->parentWidget();
+        QVERIFY(scroll);
+        auto *area=qobject_cast<QScrollArea *>(scroll);
+        name->setText("My maps");
+        QCOMPARE(feedback->text(),QString("Unsaved changes"));
+        area->verticalScrollBar()->setValue(area->verticalScrollBar()->maximum());
+        QCOMPARE(save->mapTo(w.get(),QPoint(0,0)),position);
+        QVERIFY(w->rect().contains(save->mapTo(w.get(),save->rect().center())));
+        save->click();
+        QCOMPARE(feedback->text(),QString("Changes saved")); QCOMPARE(save->text(),QString("Saved"));
+        QCOMPARE(w->findChild<QLineEdit *>("appTitle")->text(),QString("My maps"));
+        QFile shortcut(dataRoot+"/applications/atl-shelf-immich.desktop"); QVERIFY(shortcut.open(QIODevice::ReadOnly));
+        QVERIFY(shortcut.readAll().contains("Name=My maps\n"));
+        auto refreshedName = [&] { QFile f(dataRoot+"/menu-refresh-names"); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+        QTRY_VERIFY(refreshedName().contains("Name=My maps"));
+        w->resize(360,504); QTest::qWait(50);
+        QVERIFY(w->rect().contains(save->mapTo(w.get(),save->rect().center())));
+        QVERIFY(w->rect().contains(feedback->mapTo(w.get(),feedback->rect().center())));
+        w->grab().save("/tmp/shelf-rename-saved.png");
+        name->setText("Different maps"); QCOMPARE(save->text(),QString("Save"));
+        QCOMPARE(feedback->text(),QString("Unsaved changes"));
     }
     void mobileLayoutAndClearDataConfirmation() {
         std::unique_ptr<QWidget> w(createShelfForTests()); w->resize(360, 740); w->show(); QTest::qWait(80);
@@ -458,7 +490,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_CONFIG_HOME", (dataRoot + "/config").toUtf8());
     // No calls to the real session's menu index or systemd during UI tests.
     for (const QString &command : {"systemctl", "kbuildsycoca6"}) {
-        const QString path = dataRoot + "/bin/" + command; put(path, "#!/bin/sh\nexit 0\n");
+        const QString path = dataRoot + "/bin/" + command; put(path, command=="kbuildsycoca6" ? "#!/bin/sh\ngrep '^Name=' \"$XDG_DATA_HOME/applications/atl-shelf-immich.desktop\" >> \"$XDG_DATA_HOME/menu-refresh-names\"\n" : "#!/bin/sh\nexit 0\n");
         QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     }
     qputenv("PATH", (dataRoot + "/bin:").toUtf8() + qgetenv("PATH"));
