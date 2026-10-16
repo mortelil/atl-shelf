@@ -33,7 +33,7 @@ class CliTest(unittest.TestCase):
             'enabled': True, 'connected': True, 'name': 'DSI-1', 'scale': 2.65,
             'currentModeId': '1', 'rotation': 1,
             'modes': [{'id': '1', 'size': {'width': 1080, 'height': 2280}}]}]}) + '\nSCREEN\n')
-        self.runtime = self.exe('fake-atl', '#!/bin/sh\necho "scale=$ATL_RENDER_SCALE"\necho "$@"\nexit 0\n')
+        self.runtime = self.exe('fake-atl', '#!/bin/sh\nif [ "$2" = --install-internal ]; then mkdir -p "$ANDROID_APP_DATA_DIR/_installed_apks_"; cp "$1" "$ANDROID_APP_DATA_DIR/_installed_apks_/test.fixture.apk"; exit $?; fi\necho "scale=$ATL_RENDER_SCALE"\necho "$@"\nexit 0\n')
         self.apk = self.base / 'Example.apk'
         with zipfile.ZipFile(self.apk, 'w') as apk:
             apk.writestr('AndroidManifest.xml', '<manifest package="test.fixture"/>')
@@ -90,7 +90,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(entry['versionCode'], '4294967296')
         self.assertEqual(entry['packageId'], 'test.fixture')
         private = Path(entry['dataDirectory']) / 'app.apk_'
-        private.mkdir()
+        private.mkdir(exist_ok=True)
         (private / 'synthetic.txt').write_text('preserve me')
         badging('2.0', '4294967297')
         entry = self.call('replace', 'metadata', '--apk', str(self.apk))[0]
@@ -117,6 +117,91 @@ class CliTest(unittest.TestCase):
         self.call('install', '--source', 'local', '--value', str(self.apk), '--id', 'wrong', code=5)
         self.assertEqual(self.call('list')[0], [])
 
+    def test_internal_install_and_failed_replace_preserve_data(self):
+        entry = self.install()
+        base = Path(entry['dataDirectory'])
+        registered = Path(entry['registeredApkPath'])
+        self.assertEqual(registered.read_bytes(), self.apk.read_bytes())
+        self.assertEqual(entry['internalPackageId'], 'test.fixture')
+        self.assertFalse(list(base.glob('.install-*')))
+        private = base / 'app.apk_'
+        private.mkdir(exist_ok=True)
+        (private / 'keep').write_text('existing user data')
+        before = Path(entry['apkPath']).read_bytes()
+        library = (self.root / 'apps.json').read_bytes()
+        for script in ('exit 12', 'exit 0', 'mkdir -p "$ANDROID_APP_DATA_DIR/_installed_apks_"; echo corrupt > "$ANDROID_APP_DATA_DIR/_installed_apks_/test.fixture.apk"'):
+            self.runtime.write_text('#!/bin/sh\n' + script + '\n')
+            self.call('replace', 'sample', '--apk', str(self.apk), code=5)
+            self.assertEqual(Path(entry['apkPath']).read_bytes(), before)
+            self.assertEqual(registered.read_bytes(), before)
+            self.assertEqual((private / 'keep').read_text(), 'existing user data')
+            self.assertEqual((self.root / 'apps.json').read_bytes(), library)
+            self.assertFalse(list(base.glob('.install-*')))
+        self.call('clear-data', 'sample')
+        self.assertTrue(registered.exists())
+        self.call('remove', 'sample')
+        self.assertFalse(registered.exists())
+
+    def test_apps_share_profile_without_sharing_private_data(self):
+        first = self.install('first')
+        self.runtime.write_text(self.runtime.read_text().replace('test.fixture', 'test.second'))
+        second = self.install('second')
+        self.assertEqual(first['profileDirectory'], second['profileDirectory'])
+        for entry in (first, second):
+            plan = self.call('launch', entry['id'], '--dry-run')[0]
+            self.assertEqual(plan['environment']['ANDROID_APP_DATA_DIR'], first['profileDirectory'])
+            self.assertEqual(plan['arguments'][0], entry['registeredApkPath'])
+            self.call('launch', entry['id'], '--wait')
+            private = Path(entry['dataDirectory']) / 'app.apk_'
+            (private / 'sentinel').write_text(entry['id'])
+            alias = Path(entry['profileDirectory']) / (entry['internalPackageId'] + '.apk_')
+            self.assertEqual((alias / 'sentinel').read_text(), entry['id'])
+        self.call('clear-data', 'first')
+        self.call('remove', 'first')
+        self.assertTrue(Path(second['registeredApkPath']).exists())
+        self.assertEqual((Path(second['dataDirectory']) / 'app.apk_/sentinel').read_text(), 'second')
+        self.call('install', '--source', 'local', '--value', str(self.apk), '--id', 'duplicate', code=5)
+        self.assertTrue(Path(second['registeredApkPath']).exists())
+        self.call('remove', 'second')
+        self.assertFalse(Path(second['registeredApkPath']).exists())
+
+    def test_legacy_install_moves_into_shared_profile_on_launch(self):
+        entry = self.install()
+        Path(entry['registeredApkPath']).unlink()
+        db = self.root / 'apps.json'
+        entries = json.loads(db.read_text())
+        del entries[0]['internalPackageId']
+        db.write_text(json.dumps(entries))
+        private = Path(entry['dataDirectory']) / 'app.apk_'
+        private.mkdir(exist_ok=True)
+        (private / 'sentinel').write_text('preserved')
+        self.call('launch', 'sample', '--wait')
+        self.assertTrue(Path(entry['registeredApkPath']).exists())
+        self.assertEqual((private / 'sentinel').read_text(), 'preserved')
+        self.assertEqual(json.loads(db.read_text())[0]['internalPackageId'], 'test.fixture')
+
+    def test_failed_internal_install_can_be_retried(self):
+        original = self.runtime.read_text()
+        self.runtime.write_text('#!/bin/sh\necho install-failure\nexit 1\n')
+        self.call('install', '--source', 'local', '--value', str(self.apk), '--id', 'retry', code=5)
+        self.assertFalse((self.root / 'apps/retry').exists())
+        self.assertIn('install-failure', (self.root / 'logs/install-retry.log').read_text())
+        self.runtime.write_text(original)
+        self.assertEqual(self.install('retry')['internalPackageId'], 'test.fixture')
+
+    def test_cancel_internal_install_removes_temporary_state(self):
+        marker = self.base / 'installer-started'
+        self.runtime.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nimport time\nPath({str(marker)!r}).touch()\ntime.sleep(60)\n')
+        process = subprocess.Popen([str(BINARY), 'cli', 'install', '--source', 'local', '--value', str(self.apk), '--id', 'cancel-install'], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        deadline = time.monotonic()+5
+        while not marker.exists() and time.monotonic()<deadline: time.sleep(.02)
+        self.assertTrue(marker.exists())
+        process.send_signal(signal.SIGINT)
+        out, err = process.communicate(timeout=5)
+        self.assertEqual(process.returncode,130,out+err)
+        self.assertFalse((self.root / 'apps/cancel-install').exists())
+
     def test_doctor_reports_missing_private_androidfw(self):
         self.call('settings', '--set', '{"runtimeType":"github"}')
         libraries = self.call('doctor')[0]['runtimeLibraries']
@@ -134,7 +219,7 @@ class CliTest(unittest.TestCase):
         entry = self.install()
         root = Path(entry['dataDirectory'])
         private = root / 'app.apk_'
-        private.mkdir()
+        private.mkdir(exist_ok=True)
         (private / 'database').write_text('private')
         cache = root / '.cache'
         cache.mkdir()
@@ -144,7 +229,7 @@ class CliTest(unittest.TestCase):
         self.call('clear-data', 'sample', '--dry-run', code=2)
         self.assertTrue(private.exists())
         self.call('clear-data', 'sample')
-        self.assertFalse(private.exists())
+        self.assertEqual(list(private.iterdir()), [])
         self.assertFalse(cache.exists())
         self.assertTrue(Path(entry['apkPath']).exists())
         self.assertTrue((root / 'launch.log').exists())
@@ -153,6 +238,7 @@ class CliTest(unittest.TestCase):
         outside = self.base / 'shared'
         outside.mkdir()
         (outside / 'keep').write_text('keep')
+        private.rmdir()
         private.symlink_to(outside, target_is_directory=True)
         self.call('clear-data', 'sample')
         self.assertTrue((outside / 'keep').exists())

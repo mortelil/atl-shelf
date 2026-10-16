@@ -54,7 +54,7 @@ private slots:
         put(root + "/settings.json", QJsonDocument(QJsonObject{{"runtimeType", "existing"}, {"atl", dataRoot + "/fake-atl"}, {"launcher", dataRoot + "/fake-atl"}}).toJson());
         put(root + "/apps.json", QJsonDocument(QJsonArray{QJsonObject{{"id", "immich"}, {"name", "Immich"}, {"source", "local"}, {"version", "3.2.4"}, {"width",720}, {"height",1280}}}).toJson());
         put(root + "/apps/immich/app.apk", "fixture");
-        put(dataRoot + "/fake-atl", "#!/bin/sh\nprintf '%s\\n' \"$ATL_RENDER_SCALE\" \"$@\" > '" + dataRoot.toUtf8() + "/launched'\n");
+        put(dataRoot + "/fake-atl", "#!/bin/sh\nif [ \"$2\" = --install-internal ]; then mkdir -p \"$ANDROID_APP_DATA_DIR/_installed_apks_\"; cp \"$1\" \"$ANDROID_APP_DATA_DIR/_installed_apks_/example.test.apk\"; exit $?; fi\nprintf '%s\\n' \"$ATL_RENDER_SCALE\" \"$@\" > '" + dataRoot.toUtf8() + "/launched'\n");
         QFile::setPermissions(dataRoot + "/fake-atl", QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
         QFile::remove(dataRoot + "/launched");
     }
@@ -75,7 +75,7 @@ private slots:
         button(w.get(), "Save")->click();
         button(w.get(), "Open app")->click();
         QTRY_VERIFY(QFile::exists(dataRoot + "/launched"));
-        QFile launch(dataRoot + "/launched"); QVERIFY(launch.open(QIODevice::ReadOnly)); QVERIFY(launch.readAll().contains("apps/immich/app.apk"));
+        QFile launch(dataRoot + "/launched"); QVERIFY(launch.open(QIODevice::ReadOnly)); QVERIFY(launch.readAll().contains("profiles/default/_installed_apks_/example.test.apk"));
         button(w.get(), "Settings")->click(); QCOMPARE(w->findChild<QStackedWidget *>("pages")->currentIndex(), 2);
         QVERIFY(button(w.get(), "Look for ATL updates")->isVisible());
     }
@@ -335,7 +335,7 @@ private slots:
         QVERIFY(QFile::exists(dataRoot + "/applications/atl-shelf-example.desktop"));
         button(w.get(), "Open app")->click();
         QTRY_VERIFY(QFile::exists(dataRoot + "/launched"));
-        QFile launch(dataRoot + "/launched"); QVERIFY(launch.open(QIODevice::ReadOnly)); QVERIFY(launch.readAll().contains("apps/example/app.apk"));
+        QFile launch(dataRoot + "/launched"); QVERIFY(launch.open(QIODevice::ReadOnly)); QVERIFY(launch.readAll().contains("profiles/default/_installed_apks_/example.test.apk"));
     }
     void touchScrollDoesNotOpenAnApp() {
         QJsonArray entries; for (int i=0; i<40; ++i) entries.append(QJsonObject{{"id",QString::number(i)}, {"name",QString("App %1").arg(i)}, {"source","local"}});

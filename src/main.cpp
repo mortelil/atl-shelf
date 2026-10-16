@@ -48,6 +48,7 @@
 #include <QWidget>
 #include <QProcess>
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -139,6 +140,38 @@ static bool writeApps(const QJsonArray &apps) {
 }
 static QString appDir(const QJsonObject &o) { return rootDir() + "/apps/" + o.value("id").toString(); }
 static QString apkPath(const QJsonObject &o) { return appDir(o) + "/app.apk"; }
+static QString sharedProfile() { return rootDir() + "/profiles/default"; }
+static QString internalPackage(const QJsonObject &o) {
+    const QString package = o.value("internalPackageId").toString();
+    return QRegularExpression("^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+$").match(package).hasMatch() ? package : QString();
+}
+static QString registeredApk(const QJsonObject &o) {
+    const auto package = internalPackage(o);
+    return package.isEmpty() ? apkPath(o) : sharedProfile()+"/_installed_apks_/"+package+".apk";
+}
+// Keep existing private files in place, while presenting ATL with a unique
+// package-named data directory in the one shared profile.
+static bool linkPrivateData(const QJsonObject &o, QString *error) {
+    const QString package = internalPackage(o);
+    if (package.isEmpty()) { *error="The app has not been installed with ATL yet."; return false; }
+    const QString target=appDir(o)+"/app.apk_", link=sharedProfile()+"/"+package+".apk_";
+    if (!QDir().mkpath(sharedProfile()) || !QDir().mkpath(target)) { *error="Could not prepare app data."; return false; }
+    const QFileInfo info(link);
+    if (info.isSymLink() && info.symLinkTarget()==target) return true;
+    if (info.exists() || info.isSymLink() || !QFile::link(target,link)) {
+        *error="Could not connect this app's private data to the shared ATL profile."; return false;
+    }
+    return true;
+}
+static bool unregisterApp(const QJsonObject &o) {
+    const QString package=internalPackage(o);
+    if (package.isEmpty()) return true;
+    const QString link=sharedProfile()+"/"+package+".apk_";
+    bool ok=true;
+    if (QFileInfo(link).isSymLink() && QFileInfo(link).symLinkTarget()==appDir(o)+"/app.apk_") ok=QFile::remove(link);
+    if (QFile::exists(registeredApk(o))) ok=QFile::remove(registeredApk(o)) && ok;
+    return ok;
+}
 static QString desktopQuote(QString s) {
     s.replace("\\", "\\\\"); s.replace("\"", "\\\""); s.replace("`", "\\`"); s.replace("$", "\\$");
     return "\"" + s + "\"";
@@ -603,13 +636,33 @@ static QJsonObject installedApkMetadata(const QString &path) {
     if (!code.hasMatch()) metadata["warning"] = "APK versionCode is missing or invalid.";
     return metadata;
 }
+namespace ShelfCli { static QJsonArray processes(const QJsonObject &entry); }
+static bool installWithAtl(const QJsonObject &app, const QString &apk, const QString &temporaryRoot, QString *package, QString *message);
 static bool stageAndActivate(QJsonObject &o, const QByteArray &bytes, QString *message) {
+    if (!ShelfCli::processes(o).isEmpty()) { *message="Close the app before installing an update."; return false; }
     if (requestCanceled && requestCanceled()) { *message = "Interrupted before activating the APK."; return false; }
     const QString dir = appDir(o); QDir().mkpath(dir);
     QFile staged(dir + "/app.apk.new");
     if (!staged.open(QIODevice::WriteOnly) || staged.write(bytes) != bytes.size()) { *message = "Could not write the APK file."; return false; }
     staged.close();
     const auto metadata = installedApkMetadata(staged.fileName());
+    QTemporaryDir installation(dir + "/.install-XXXXXX");
+    QString installedPackage;
+    if (!installation.isValid() || !installWithAtl(o, staged.fileName(), installation.path(), &installedPackage, message)) {
+        QFile::remove(staged.fileName());
+        if (message->isEmpty()) *message = "Could not prepare ATL installation.";
+        return false;
+    }
+    for (const auto &value : readApps()) {
+        const auto other=value.toObject();
+        if (other.value("id")!=o.value("id") && internalPackage(other)==installedPackage) {
+            QFile::remove(staged.fileName());
+            *message="This Android package is already installed as "+other.value("name").toString()+". Update that app instead.";
+            return false;
+        }
+    }
+    QJsonObject installedEntry=o; installedEntry["internalPackageId"]=installedPackage;
+    if (!linkPrivateData(installedEntry,message)) { QFile::remove(staged.fileName()); return false; }
     const QString oldPath = apkPath(o) + ".old";
     QFile::remove(oldPath);
     const bool hadOld = QFile::exists(apkPath(o));
@@ -618,7 +671,17 @@ static bool stageAndActivate(QJsonObject &o, const QByteArray &bytes, QString *m
         if (hadOld) QFile::rename(oldPath, apkPath(o));
         *message = "Could not activate the new APK."; return false;
     }
+    const QString registry = sharedProfile() + "/_installed_apks_/" + installedPackage + ".apk";
+    QDir().mkpath(QFileInfo(registry).absolutePath());
+    QSaveFile registered(registry);
+    if (!registered.open(QIODevice::WriteOnly) || registered.write(bytes) != bytes.size() || !registered.commit()) {
+        QFile::remove(apkPath(o));
+        if (hadOld) QFile::rename(oldPath, apkPath(o));
+        *message = "Could not publish ATL's installed APK. The previous APK was retained.";
+        return false;
+    }
     QFile::remove(oldPath);
+    o["internalPackageId"] = installedPackage;
     o["installedApk"] = metadata;
     if (o.value("source").toString() == "local" || o.value("source").toString() == "apkmirror") {
         o["version"] = metadata.value("version").toString();
@@ -689,6 +752,26 @@ static bool writeTimer(const QJsonObject &o, bool enabled, QString *why = nullpt
     return false;
 }
 
+static bool ensureInternalInstall(QJsonObject &o, QString *error) {
+    auto env=readSettings().value("runtimeEnv").toObject();
+    const auto local=o.value("launchEnv").toObject();
+    for (auto i=local.begin();i!=local.end();++i) env[i.key()]=i.value();
+    const QString custom=QDir::cleanPath(env.value("ANDROID_APP_DATA_DIR").toString());
+    if (env.contains("ANDROID_APP_DATA_DIR") && custom!=appDir(o) && custom!=sharedProfile()) {
+        *error="This app uses a custom data directory. Migrate its data before using Shelf's shared profile."; return false;
+    }
+    if (!internalPackage(o).isEmpty() && QFile::exists(registeredApk(o))) return true;
+    QFile apk(apkPath(o));
+    if (!apk.open(QIODevice::ReadOnly)) { *error="APK file is missing."; return false; }
+    if (!stageAndActivate(o,apk.readAll(),error)) return false;
+    auto entries=readApps();
+    for (int i=0;i<entries.size();++i) if (entries[i].toObject().value("id")==o.value("id")) {
+        entries[i]=o;
+        if (!writeApps(entries)) { *error="Could not save the installed app."; return false; }
+        return true;
+    }
+    *error="App is no longer in the library."; return false;
+}
 struct LaunchPlan {
     QString program, workingDirectory;
     QStringList arguments;
@@ -699,7 +782,7 @@ static bool prepareLaunch(const QJsonObject &o, LaunchPlan *plan, QString *error
         const QJsonObject settings = readSettings();
         const QString launcher = settings.value("launcher").toString(settings.value("atl").toString());
         if (settings.value("atl").toString().isEmpty() || !QFileInfo::exists(settings.value("atl").toString()) || !QFileInfo(launcher).isExecutable()) { *error = "Set up Android support in Shelf before launching apps."; return false; }
-        plan->program = launcher; QStringList args{apkPath(o)};
+        plan->program = launcher; QStringList args{registeredApk(o)};
         if (!o.value("activity").toString().isEmpty()) args << "-l" << o.value("activity").toString();
         // GTK window arguments are logical coordinates; Android renders at output density.
         const auto display = currentDisplay();
@@ -711,7 +794,7 @@ static bool prepareLaunch(const QJsonObject &o, LaunchPlan *plan, QString *error
         for (auto it = launchEnv.begin(); it != launchEnv.end(); ++it) mergedEnv[it.key()] = it.value();
         for (auto it = mergedEnv.begin(); it != mergedEnv.end(); ++it)
             if (QRegularExpression("^[A-Za-z_][A-Za-z0-9_]*$").match(it.key()).hasMatch() && it.value().isString()) env.insert(it.key(), it.value().toString());
-        if (!mergedEnv.contains("ANDROID_APP_DATA_DIR")) env.insert("ANDROID_APP_DATA_DIR", appDir(o));
+        env.insert("ANDROID_APP_DATA_DIR", sharedProfile());
         env.insert("ATL_RENDER_SCALE", QString::number(display.scale)); plan->environment = env;
         const QString workdir = o.value("workingDirectory").toString(settings.value("workingDirectory").toString());
         plan->workingDirectory = workdir;
@@ -726,7 +809,59 @@ static void applyLaunch(QProcess &process, const LaunchPlan &plan) {
     if (!plan.workingDirectory.isEmpty()) process.setWorkingDirectory(plan.workingDirectory);
     process.setProcessChannelMode(QProcess::MergedChannels);
 }
-static bool launchAndroidApp(const QJsonObject &o, QString *error) {
+// Run ATL against disposable app data: installation must not execute app startup
+// code against an existing user's profile. Publish only its verified APK result.
+static bool installWithAtl(const QJsonObject &app, const QString &apk, const QString &temporaryRoot, QString *package, QString *message) {
+    LaunchPlan plan;
+    if (!prepareLaunch(app, &plan, message)) return false;
+    const QString input = temporaryRoot + "/app.apk";
+    if (!QFile::copy(apk,input)) { *message = "Could not stage the APK for ATL."; return false; }
+    plan.arguments = {input, "--install-internal"};
+    plan.environment.insert("ANDROID_APP_DATA_DIR",temporaryRoot);
+    plan.environment.insert("XDG_CACHE_HOME",temporaryRoot+"/.cache");
+    QDir().mkpath(temporaryRoot+"/media");
+    plan.environment.insert("ATL_MEDIA_ROOT",temporaryRoot+"/media");
+    QDir().mkpath(rootDir()+"/logs");
+    const QString log = rootDir()+"/logs/install-"+safeId(app.value("id").toString())+".log";
+    QProcess process; applyLaunch(process,plan); process.setStandardOutputFile(log,QIODevice::Truncate);
+    process.setChildProcessModifier([] { ::setsid(); });
+    if (transferDialog) { transferDialog->setLabelText("Installing with ATL…"); transferDialog->setRange(0,0); }
+    process.start();
+    if (!process.waitForStarted(5000)) { *message = "Could not start ATL: "+process.errorString(); return false; }
+    const qint64 installerPid = process.processId();
+    QElapsedTimer elapsed; elapsed.start();
+    bool canceled = false, timedOut = false;
+    while (process.state()!=QProcess::NotRunning && !process.waitForFinished(50)) {
+        QCoreApplication::processEvents();
+        canceled = downloadCanceled(); timedOut = elapsed.elapsed() > 300000;
+        if (canceled || timedOut) { if (installerPid>0) ::kill(-installerPid,SIGKILL); process.kill(); process.waitForFinished(); break; }
+    }
+    if (canceled || timedOut || process.exitStatus()!=QProcess::NormalExit || process.exitCode()!=0) {
+        *message = canceled ? "Installation canceled." : timedOut ? "ATL installation timed out. See " + log : "ATL installation failed. See " + log;
+        return false;
+    }
+    const auto outputs = QDir(temporaryRoot+"/_installed_apks_").entryInfoList({"*.apk"},QDir::Files|QDir::NoSymLinks);
+    if (outputs.size()!=1 || !QRegularExpression("^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+$").match(outputs.first().completeBaseName()).hasMatch()) {
+        *message = "ATL did not register the APK. See " + log; return false;
+    }
+    QFile installed(outputs.first().absoluteFilePath()), original(apk);
+    if (!installed.open(QIODevice::ReadOnly) || !original.open(QIODevice::ReadOnly)) { *message="Could not verify ATL's installed APK."; return false; }
+    QCryptographicHash actual(QCryptographicHash::Sha256), expected(QCryptographicHash::Sha256);
+    if (!actual.addData(&installed) || !expected.addData(&original) || actual.result()!=expected.result()) { *message="ATL's installed APK does not match the downloaded file."; return false; }
+    *package = outputs.first().completeBaseName();
+    const QString previousPackage = app.value("internalPackageId").toString(app.value("installedApk").toObject().value("packageId").toString());
+    if (!previousPackage.isEmpty() && previousPackage != *package) { *message="This APK belongs to a different package. Install it as a separate app."; return false; }
+    return true;
+}
+static bool launchAndroidApp(QJsonObject o, QString *error) {
+    auto lock=lockLibrary(); if (!lock) { *error="Shelf is busy."; return false; }
+    const QString id=o.value("id").toString();
+    bool found=false;
+    for (const auto &value:readApps()) if (value.toObject().value("id").toString()==id) { o=value.toObject(); found=true; break; }
+    if (!found) { *error="App is no longer installed."; return false; }
+    if (!ShelfCli::processes(o).isEmpty()) { *error="App is already running."; return false; }
+    if (!ensureInternalInstall(o,error) || !linkPrivateData(o,error)) return false;
+    QDir().mkpath(appDir(o)+"/app.apk_");
     LaunchPlan plan; if (!prepareLaunch(o, &plan, error)) return false;
     QProcess process; applyLaunch(process, plan);
     process.setStandardOutputFile(appDir(o) + "/launch.log", QIODevice::Truncate);
@@ -1255,6 +1390,7 @@ private:
         auto *remove = new QPushButton("Remove app"); confirmLayout->addWidget(remove); connect(remove, &QPushButton::clicked, &confirm, &QDialog::accept);
         if (confirm.exec() != QDialog::Accepted) return;
 
+        if (!ShelfCli::processes(o).isEmpty()) { mobileNotice(this,"App is running","Close the app before removing it."); return; }
         QJsonArray remaining = apps;
         remaining.removeAt(row);
         if (!writeApps(remaining)) { mobileNotice(this, "Remove failed", "Could not update the app library. Nothing was removed."); return; }
@@ -1262,6 +1398,7 @@ private:
         QString ignored;
         writeTimer(o, false, &ignored);
         QStringList leftovers;
+        if (!unregisterApp(o)) leftovers << "the shared profile registration";
         const QString desktopFile = desktopPath() + "/atl-shelf-" + o.value("id").toString() + ".desktop";
         if (QFile::exists(desktopFile) && !QFile::remove(desktopFile)) leftovers << "the Plasma menu entry";
         QProcess::execute("kbuildsycoca6", {"--noincremental"});
@@ -1420,7 +1557,7 @@ private:
             }
             progress.hide();
             if (!error.isEmpty()) { QDir(appDir(o)).removeRecursively(); if (!progress.wasCanceled()) mobileNotice(&dialog, "Could not install app", error); return; }
-            QJsonArray previousApps = apps; apps.append(o); if (!writeApps(apps)) { apps = previousApps; QDir(appDir(o)).removeRecursively(); mobileNotice(&dialog, "Save failed", "Could not save the app library."); return; }
+            QJsonArray previousApps = apps; apps.append(o); if (!writeApps(apps)) { apps = previousApps; unregisterApp(o); QDir(appDir(o)).removeRecursively(); mobileNotice(&dialog, "Save failed", "Could not save the app library."); return; }
             updateDesktop(o, atlPath->text()); QString timerMessage; const bool timerEnabled = !o.value("daily").toBool() || writeTimer(o, true, &timerMessage);
             if (!timerEnabled) { o["daily"] = false; o["updateError"] = timerMessage; apps[apps.size() - 1] = o; writeApps(apps); }
             dialog.accept(); reload(); openDetails(apps.size() - 1); status->setText("Installed · ready to open" + (timerEnabled ? QString() : "\nAutomatic updates could not be enabled."));

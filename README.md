@@ -29,7 +29,7 @@ Choose **Set up runtime…** in the app and select one of:
 - **Install with Alpine APK** installs `android-translation-layer`, `bionic_translation`, and `art_standalone` from the configured Alpine repositories. APK resolves and installs their package dependencies.
 - **Use an existing binary** points ATL Shelf at an ATL executable already on the device.
 
-The runtime setup screen shows build output and shows the automatic display scale and lets you choose window mode, and optional access to `~/Pictures`. New app launchers inherit the runtime environment and working directory, plus the app's own data directory and resolution. Setup and source builds run inside ATL Shelf; they do not require a terminal. Source-built files stay in the app's private runtime prefix rather than replacing system libraries.
+The runtime setup screen shows build output and shows the automatic display scale and lets you choose window mode, and optional access to `~/Pictures`. New app launchers inherit the runtime environment and working directory, plus the shared ATL profile and each app's resolution. Setup and source builds run inside ATL Shelf; they do not require a terminal. Source-built files stay in the app's private runtime prefix rather than replacing system libraries.
 
 Building source requires Alpine edge/testing packages to be available. The GitHub fork includes the tested mobile build script and dependency lock. The GitLab option follows the upstream Alpine build recipe. Full source builds can take a while, particularly on a phone.
 
@@ -61,6 +61,8 @@ Run `build/atl-shelf`. Use **Set up Android support** on first launch, then sele
 APK launcher icons are extracted on installation and update, with a background refresh for existing apps. Shelf supports raster icons and adaptive foreground/background icons, including vector paths, groups and gradients. Adaptive icons use a circular launcher mask; their own background colors are preserved. Unsupported drawable types fall back to the verified repository icon or a generic icon.
 
 The app interface is in English. Open an app's details and choose **Remove app** to remove its Plasma launcher and update timer, then delete its APK and ATL app-data directory. ATL Shelf includes a scalable SVG application icon; `cmake --install` installs it into the hicolor icon theme along with the launcher entry.
+
+All apps use one ATL profile. Installations, replacements and updates run ATL’s `--install-internal`, verify the registered APK, and publish it in the shared package registry. Existing apps join the profile on their next launch or update; their private data stays in place. Each Android package can be installed once.
 
 Daily checks use a per-user systemd timer. The timer is enabled only when the checkbox is selected for a GitHub or F-Droid app. Downloads are staged before replacing the current APK, and the app's ATL data directory stays the same between versions. GitHub release digests are checked when provided. APKs with native libraries are checked against the host architecture before activation.
 

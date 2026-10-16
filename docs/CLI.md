@@ -186,3 +186,28 @@ repository, and the pinned signing key and signed SHA-256 checks remain required
 The selected mirror is reused for index, icon and APK downloads in that process.
 Connection failures report the underlying network error instead of “HTTP 0”.
 FAU is listed in [F-Droid's mirror documentation](https://f-droid.org/docs/Running_a_Mirror/).
+
+
+### Internal installation and the shared ATL profile
+
+GUI and CLI installation, replacement and update all invoke the configured ATL
+launcher with `--install-internal`. ATL runs against disposable staging data;
+Shelf requires a successful exit and an exact SHA-256 match of its registered
+APK before atomically publishing it. Installation logs survive failures under
+`logs/install-ID.log`. Failed or canceled installation retains the previous APK
+and private data. A graphical session may be required by the ATL installer.
+
+Every app launches with the same `ANDROID_APP_DATA_DIR`,
+`<Shelf data root>/profiles/default`, using
+`_installed_apks_/<Android package>.apk`. `show` reports `profileDirectory` and
+`registeredApkPath`. Only one Shelf entry per registered Android package is
+allowed. Use `replace` or `update` on that entry instead of installing a duplicate.
+
+The shared profile links each package's private directory to its existing
+`apps/ID/app.apk_` directory. This preserves data without copying or merging
+private files between apps. Existing entries are registered on their next launch
+or update. `clear-data` affects only that app; `remove` also removes its shared
+registration, including with `--keep-data` (which retains private files).
+Custom data-directory overrides cannot be used to launch a separate profile;
+legacy custom data needs migration before launching. Dry runs do not migrate
+old entries or run ATL.

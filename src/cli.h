@@ -53,7 +53,7 @@ static QJsonArray processes(const QJsonObject &entry) {
         if (!numeric || pid<=1 || dir.ownerId()!=getuid()) continue;
         QFile file(dir.filePath()+"/cmdline"); if (!file.open(QIODevice::ReadOnly)) continue;
         const auto args=file.readAll().split('\0');
-        if (!args.contains(apkPath(entry).toUtf8())) continue;
+        if (!args.contains(apkPath(entry).toUtf8()) && !args.contains(registeredApk(entry).toUtf8())) continue;
         const auto exe=QFileInfo(dir.filePath()+"/exe").symLinkTarget();
         if (exe==binary || exe==launcher || args.contains(binary.toUtf8()) || args.contains(launcher.toUtf8())) result.append(pid);
     }
@@ -98,11 +98,12 @@ static bool clearPrivateData(const QJsonObject &entry, QString *error) {
         QFileInfo(base).canonicalFilePath() != base) {
         *error = "The managed app directory is missing or redirected. Nothing was cleared."; return false;
     }
-    auto env = readSettings().value("runtimeEnv").toObject();
-    const auto local = entry.value("launchEnv").toObject();
-    for (auto i=local.begin(); i!=local.end(); ++i) env[i.key()]=i.value();
-    if (env.contains("ANDROID_APP_DATA_DIR") && QDir::cleanPath(env.value("ANDROID_APP_DATA_DIR").toString()) != base) {
-        *error = "This app uses a custom data directory. Automatic clearing is unavailable to protect shared data."; return false;
+    auto env=readSettings().value("runtimeEnv").toObject();
+    const auto local=entry.value("launchEnv").toObject();
+    for (auto i=local.begin();i!=local.end();++i) env[i.key()]=i.value();
+    const auto custom=QDir::cleanPath(env.value("ANDROID_APP_DATA_DIR").toString());
+    if (env.contains("ANDROID_APP_DATA_DIR") && custom!=base && custom!=sharedProfile()) {
+        *error="This app has a custom data directory override. Remove it before clearing private data."; return false;
     }
     for (const auto &name : QStringList{QFileInfo(apkPath(entry)).fileName()+"_", ".cache"}) {
         const QString path = base+"/"+name;
@@ -111,10 +112,12 @@ static bool clearPrivateData(const QJsonObject &entry, QString *error) {
         const bool ok = info.isSymLink() ? QFile::remove(path) : !info.exists() || (info.isDir() ? QDir(path).removeRecursively() : QFile::remove(path));
         if (!ok) { *error = "Could not clear " + path + ". Some private data may already have been removed."; return false; }
     }
+    if (!internalPackage(entry).isEmpty() && !QDir().mkpath(base+"/app.apk_")) { *error="Could not recreate the empty app data directory."; return false; }
     return true;
 }
 static QJsonObject inspect(QJsonObject entry) {
     entry["apkPath"]=apkPath(entry); entry["dataDirectory"]=appDir(entry);
+    entry["profileDirectory"]=sharedProfile(); entry["registeredApkPath"]=registeredApk(entry);
     entry["logPath"]=appDir(entry)+"/launch.log"; entry["processes"]=processes(entry);
     return entry;
 }
@@ -236,7 +239,7 @@ static int shelfCli(QStringList arguments) {
         if(error.error!=QJsonParseError::NoError || !doc.isObject()) return reply(false,{},"Expected a JSON object: "+error.errorString(),2);
         patch=doc.object();
     }
-    const bool modifies=QStringList{"install","replace","configure","update","remove","clear-data","icons","refresh","runtime"}.contains(command) || (command=="settings" && (options.contains("--set")||options.contains("--file")));
+    const bool modifies=(command=="launch" && !options.contains("--dry-run")) || QStringList{"install","replace","configure","update","remove","clear-data","icons","refresh","runtime"}.contains(command) || (command=="settings" && (options.contains("--set")||options.contains("--file")));
     auto lock=(modifies && !(command=="runtime" && id=="show")) ? lockLibrary() : std::unique_ptr<QLockFile>();
     if(modifies && !(command=="runtime" && id=="show") && !lock) return reply(false,{},"Another installation, update or settings change is running.",4);
     auto entries=readApps();
@@ -322,10 +325,10 @@ static int shelfCli(QStringList arguments) {
         if(source=="github" || source=="fdroid") { if(!resolveApkSource(entry,&result)) return reply(false,{},result.message); }
         else { QFile file(value); if(!file.open(QIODevice::ReadOnly)) return reply(false,{},"Could not read APK."); result.bytes=file.readAll(); if(!apkMatchesHostArchitecture(result.bytes)) return reply(false,{},"Invalid or incompatible APK."); }
         if(interrupted) return reply(false,{},"Interrupted.",130);
-        if(!stageAndActivate(entry,result.bytes,&error)) return reply(false,{},error);
+        if(!stageAndActivate(entry,result.bytes,&error)) { QDir(appDir(entry)).removeRecursively(); return reply(false,{},error); }
         saveAppIcon(entry,result.iconBytes);
         if(source=="github" || source=="fdroid") { entry["version"]=result.version; entry["versionCode"]=result.versionCode; entry["fdroidLatestCode"]=result.latestCode; }
-        entries.append(entry); if(!writeApps(entries)) { QDir(appDir(entry)).removeRecursively(); return reply(false,{},"Cannot save app library."); }
+        entries.append(entry); if(!writeApps(entries)) { unregisterApp(entry); QDir(appDir(entry)).removeRecursively(); return reply(false,{},"Cannot save app library."); }
         updateDesktop(entry,{});
         if(entry.value("daily").toBool() && !writeTimer(entry,true,&error)) { entry["daily"]=false; entry["updateError"]=error; entries[entries.size()-1]=entry; writeApps(entries); return reply(false,inspect(entry),"App installed, but daily updates could not be enabled: "+error); }
         return reply(true,inspect(entry));
@@ -384,20 +387,25 @@ static int shelfCli(QStringList arguments) {
         entries[index]=entry; if(!writeApps(entries)) { if(oldDaily!=entry.value("daily").toBool()) writeTimer(entry,oldDaily); return reply(false,{},"Cannot save app library."); } updateDesktop(entry,{}); return reply(true,inspect(entry));
     }
     if(command=="launch") {
+        if (!options.contains("--dry-run") && !processes(entry).isEmpty()) return reply(false,{},"App is already running. Use stop before relaunching.",4);
+        QString installError;
+        if (!options.contains("--dry-run") && (!ensureInternalInstall(entry,&installError) || !linkPrivateData(entry,&installError))) return reply(false,{},installError);
         if(options.contains("--activity")) entry["activity"]=options.value("--activity");
         LaunchPlan plan; QString error; if(!prepareLaunch(entry,&plan,&error)) return reply(false,{},error);
         if(options.contains("--env")) {
             QJsonParseError parse; const auto doc=QJsonDocument::fromJson(options.value("--env").toUtf8(),&parse);
             if(parse.error!=QJsonParseError::NoError || !environmentValid(doc.object()) || !doc.isObject()) return reply(false,{},"--env must be a JSON object of environment names and string/null values.",2);
             const auto changes=doc.object();
+            if (changes.contains("ANDROID_APP_DATA_DIR")) return reply(false,{},"All apps use Shelf's shared ATL profile.",2);
             for(auto i=changes.begin();i!=changes.end();++i) { if(i.value().isNull()) { plan.environment.remove(i.key()); plan.overrides[i.key()]=QJsonValue::Null; } else { plan.environment.insert(i.key(),i.value().toString()); plan.overrides[i.key()]=i.value(); } }
         }
         QJsonObject result{{"program",plan.program},{"arguments",QJsonArray::fromStringList(plan.arguments)},{"workingDirectory",plan.workingDirectory},{"environment",plan.overrides},{"display",display()},{"logPath",appDir(entry)+"/launch.log"}};
         if(options.contains("--dry-run")) return reply(true,result);
         if(!QFile::exists(apkPath(entry))) return reply(false,result,"APK file is missing.");
         const auto active=processes(entry); if(!active.isEmpty()) return reply(false,QJsonObject{{"processes",active}},"App is already running. Use stop before relaunching.",4);
+        QDir().mkpath(appDir(entry)+"/app.apk_");
         QProcess process; applyLaunch(process,plan);
-        if(options.contains("--wait")) { const int exit=run(process,appDir(entry)+"/launch.log"); result["exitCode"]=exit; return reply(exit==0,result,exit==0 ? QString() : "App exited unsuccessfully. See launch log.",exit==130 ? 130 : 6); }
+        if(options.contains("--wait")) { QObject::connect(&process,&QProcess::started,[&lock] { if (lock) lock->unlock(); }); const int exit=run(process,appDir(entry)+"/launch.log"); result["exitCode"]=exit; return reply(exit==0,result,exit==0 ? QString() : "App exited unsuccessfully. See launch log.",exit==130 ? 130 : 6); }
         process.setStandardOutputFile(appDir(entry)+"/launch.log",QIODevice::Truncate); qint64 pid=0;
         if(!process.startDetached(&pid)) return reply(false,result,process.errorString());
         result["pid"]=pid; result["state"]="started (not a compatibility check)"; return reply(true,result);
@@ -422,6 +430,7 @@ static int shelfCli(QStringList arguments) {
         QString error; if(!writeTimer(entry,false,&error)) return reply(false,{},"Could not disable app update timer: "+error);
         entries.removeAt(index); if(!writeApps(entries)) return reply(false,{},"Cannot save app library; app data was preserved.");
         QStringList leftovers;
+        if(!unregisterApp(entry)) leftovers<<registeredApk(entry);
         const QString desktop=desktopPath()+"/atl-shelf-"+id+".desktop";
         if(QFile::exists(desktop) && !QFile::remove(desktop)) leftovers<<desktop;
         if(!options.contains("--keep-data") && !QDir(appDir(entry)).removeRecursively()) leftovers<<appDir(entry);
