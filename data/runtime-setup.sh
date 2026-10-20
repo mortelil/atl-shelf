@@ -126,6 +126,21 @@ fi
 # Never retain a successful marker after a partial or failed rebuild.
 rm -f "$root/built-revisions"
 echo "Building runtime…"
+if [ "$mode" != apk ] && [ "$mode" != existing ] && [ "${ATL_RUNTIME_TEST_SKIP_GSTREAMER:-0}" != 1 ] && ! pkg-config --exists gstreamer-app-1.0 gstreamer-video-1.0; then
+    echo "ATL now needs the GStreamer development packages for media playback."
+    apk_bin=$(command -v apk || true)
+    if [ -z "$apk_bin" ]; then echo "Alpine apk is unavailable; install gstreamer-dev and gst-plugins-base-dev, then retry." >&2; exit 1; fi
+    if [ "$(id -u)" -eq 0 ]; then
+        "$apk_bin" add --no-progress gstreamer-dev gst-plugins-base-dev
+    elif [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v pkexec >/dev/null 2>&1; then
+        pkexec "$apk_bin" add --no-progress gstreamer-dev gst-plugins-base-dev
+    elif command -v doas >/dev/null 2>&1; then
+        doas "$apk_bin" add --no-progress gstreamer-dev gst-plugins-base-dev
+    else
+        echo "Install gstreamer-dev and gst-plugins-base-dev as administrator, then retry." >&2; exit 1
+    fi
+    pkg-config --exists gstreamer-app-1.0 gstreamer-video-1.0 || { echo "GStreamer development packages are still unavailable." >&2; exit 1; }
+fi
 if [ "$mode" = github ]; then
     # We intentionally build branch heads rather than dependency-lock.json pins.
     # Both companion checkouts have already passed our strict cleanliness check.

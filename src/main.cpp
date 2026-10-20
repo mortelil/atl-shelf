@@ -1206,7 +1206,7 @@ private:
             QStringList apkPackages;
             if (mode == "apk") apkPackages = {"android-translation-layer", "bionic_translation", "art_standalone"};
             else {
-                apkPackages = {"git", "build-base", "meson", "python3", "pkgconf", "java-common", "openjdk8-jdk", "openjdk21-jdk", "curl", "jemalloc", "android-build-tools", "elfutils-dev", "libunwind-dev", "libbsd-dev", "libcap-dev", "pc:alsa", "pc:glib-2.0", "pc:gtk4", "pc:gudev-1.0", "pc:libportal", "pc:openxr", "pc:vulkan", "pc:webkitgtk-6.0", "pc:libsecret-1", "ffmpeg-dev", "skiasharp", "bionic_translation-dev", "art_standalone-dev", "libandroidfw-dev"};
+                apkPackages = {"git", "build-base", "meson", "python3", "pkgconf", "java-common", "openjdk8-jdk", "openjdk21-jdk", "curl", "jemalloc", "android-build-tools", "elfutils-dev", "libunwind-dev", "libbsd-dev", "libcap-dev", "pc:alsa", "pc:glib-2.0", "pc:gtk4", "pc:gudev-1.0", "pc:libportal", "pc:openxr", "pc:vulkan", "pc:webkitgtk-6.0", "pc:libsecret-1", "ffmpeg-dev", "gstreamer-dev", "gst-plugins-base-dev", "skiasharp", "bionic_translation-dev", "art_standalone-dev", "libandroidfw-dev"};
                 if (mode == "gitlab") apkPackages << "wolfssl-dev";
             }
             apkPackages << "android-build-tools" << "unzip" << "qt6-qtsvg";

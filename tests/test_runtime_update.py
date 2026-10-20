@@ -64,9 +64,21 @@ chmod +x "$ATL_BUILD_DIR/android-translation-layer"
             self.remotes[repo] = remote
 
     def run_update(self, ok=True, action="update"):
-        result = subprocess.run(['sh', str(SCRIPT), 'github', str(self.root), '1', action, str(getattr(self, 'patch_file', '/dev/null'))], capture_output=True, text=True)
+        env = os.environ.copy()
+        env['ATL_RUNTIME_TEST_SKIP_GSTREAMER'] = '1'
+        result = subprocess.run(['sh', str(SCRIPT), 'github', str(self.root), '1', action, str(getattr(self, 'patch_file', '/dev/null'))], capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
         return result.stdout
+
+    def test_gstreamer_build_dependencies_are_installed_for_repository_runtimes(self):
+        setup = SCRIPT.read_text()
+        self.assertIn('pkg-config --exists gstreamer-app-1.0 gstreamer-video-1.0', setup)
+        self.assertIn('gstreamer-dev gst-plugins-base-dev', setup)
+        gui = (SCRIPT.parents[1] / 'src/main.cpp').read_text()
+        cli = (SCRIPT.parents[1] / 'src/cli.h').read_text()
+        for source in (gui, cli):
+            self.assertIn('"gstreamer-dev"', source)
+            self.assertIn('"gst-plugins-base-dev"', source)
 
     def test_update_latest_heads_failure_retry_and_edits(self):
         self.run_update()
