@@ -300,14 +300,18 @@ static int shelfCli(QStringList arguments) {
                 launcher=mode=="github" ? base+"/workspace/android_translation_layer/scripts/mobile/run.sh" : base+"/atl-launcher.sh";
             }
         }
-        if(id=="update") return reply(true,readSettings());
+        if(id=="update") {
+            auto result=readSettings(); result["startupPreparationWarning"]=prepareInstalledStartups();
+            return reply(true,result);
+        }
         auto settings=rawSettings(); const QString previousMode=settings.value("runtimeType").toString(); settings["runtimeType"]=mode; settings["runtimeLabel"]="Configured via CLI ("+mode+")"; settings["atl"]=binary; settings["launcher"]=launcher; settings["workingDirectory"]=workdir;
         auto env=settings.value("runtimeEnv").toObject();
         if(previousMode!=mode) for(const auto &key:QStringList{"ATL_WORKSPACE","ATL_PREFIX","ATL_BUILD_DIR"}) env.remove(key);
         if(!env.contains("ATL_DISABLE_FULLSCREEN")) env["ATL_DISABLE_FULLSCREEN"]="1";
         settings["runtimeEnv"]=env;
         if(!saveSettings(settings)) return reply(false,{},"Runtime built but settings could not be saved.");
-        return reply(true,readSettings());
+        auto result=readSettings(); result["startupPreparationWarning"]=prepareInstalledStartups();
+        return reply(true,result);
     }
     if(command=="install") {
         const auto source=options.value("--source"),value=options.value("--value");

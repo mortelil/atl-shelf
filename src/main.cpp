@@ -638,6 +638,7 @@ static QJsonObject installedApkMetadata(const QString &path) {
 }
 namespace ShelfCli { static QJsonArray processes(const QJsonObject &entry); }
 static bool installWithAtl(const QJsonObject &app, const QString &apk, const QString &temporaryRoot, QString *package, QString *message);
+static void prepareStartup(QJsonObject &app, const std::function<bool()> &canceled = {});
 static bool stageAndActivate(QJsonObject &o, const QByteArray &bytes, QString *message) {
     if (!ShelfCli::processes(o).isEmpty()) { *message="Close the app before installing an update."; return false; }
     if (requestCanceled && requestCanceled()) { *message = "Interrupted before activating the APK."; return false; }
@@ -689,6 +690,7 @@ static bool stageAndActivate(QJsonObject &o, const QByteArray &bytes, QString *m
         o["packageId"] = metadata.value("packageId").toString();
     }
     extractAppIcon(o);
+    prepareStartup(o);
     return true;
 }
 static bool updateOne(QJsonObject &o, QString *message) {
@@ -808,6 +810,68 @@ static void applyLaunch(QProcess &process, const LaunchPlan &plan) {
     process.setProcessEnvironment(plan.environment);
     if (!plan.workingDirectory.isEmpty()) process.setWorkingDirectory(plan.workingDirectory);
     process.setProcessChannelMode(QProcess::MergedChannels);
+}
+// Preparation is optional: a verified installation remains usable if compilation
+// fails. Always use the final registered path and the normal launch environment.
+static void prepareStartup(QJsonObject &app, const std::function<bool()> &canceled) {
+    const QString logPath = appDir(app) + "/startup-preparation.log";
+    auto record = [&](const QString &status, const QString &message) {
+        app["startupPreparation"] = QJsonObject{{"status",status},{"message",message},
+            {"logPath",logPath},{"at",QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}};
+    };
+    auto interrupted = [&] { return downloadCanceled() || (canceled && canceled()); };
+    LaunchPlan plan; QString error;
+    if (!prepareLaunch(app,&plan,&error)) { record("failed",error); return; }
+    if (!ShelfCli::processes(app).isEmpty()) { record("skipped","Close the app before preparing its startup cache."); return; }
+    if (interrupted()) { record("canceled","Installation retained; startup preparation canceled."); return; }
+    auto run = [&](const QString &option, int timeout, QByteArray *output) {
+        QProcess process;
+        plan.arguments = {registeredApk(app),option};
+        applyLaunch(process,plan);
+        process.setChildProcessModifier([] { ::setsid(); });
+        process.setStandardOutputFile(logPath,QIODevice::Truncate);
+        process.start();
+        if (!process.waitForStarted(5000)) { error=process.errorString(); return false; }
+        const qint64 pid=process.processId(); QElapsedTimer timer; timer.start();
+        bool stopped=false;
+        while (process.state()!=QProcess::NotRunning && !process.waitForFinished(50)) {
+            QCoreApplication::processEvents();
+            if (interrupted() || timer.elapsed()>timeout) {
+                error=interrupted() ? "Startup preparation canceled." : "Startup preparation timed out.";
+                if (pid>0) ::kill(-pid,SIGKILL);
+                process.kill(); process.waitForFinished(5000); stopped=true; break;
+            }
+        }
+        QFile log(logPath);
+        if (log.open(QIODevice::ReadOnly)) {
+            if (log.size()>65536) log.seek(log.size()-65536);
+            *output=log.readAll();
+        }
+        return !stopped && process.exitStatus()==QProcess::NormalExit && process.exitCode()==0;
+    };
+    // Pass help through the launcher too: it supplies required shared libraries.
+    // ATL parses --help before starting Android code, including on older versions.
+    QByteArray output;
+    if (!run("--help",10000,&output)) { record(interrupted()?"canceled":"failed",error.isEmpty()?"Could not query ATL preparation support. See log.":error); return; }
+    if (!output.contains("--prepare")) { record("unsupported","This ATL runtime does not support startup preparation."); return; }
+    if (transferDialog) { transferDialog->setLabelText("Preparing faster startup…"); transferDialog->setRange(0,0); }
+    output.clear();
+    const bool ok=run("--prepare",300000,&output);
+    const QByteArray marker="ATL PREPARE OK: "+registeredApk(app).toUtf8();
+    if (ok && output.split('\n').contains(marker)) record("ready","Startup cache prepared.");
+    else record(interrupted()?"canceled":"failed",error.isEmpty()?"Installed successfully; startup preparation failed. See log.":error);
+}
+// Caller holds the library lock. Persist each outcome, including partial runs.
+static QString prepareInstalledStartups(const std::function<bool()> &canceled = {}) {
+    auto entries=readApps(); int failures=0;
+    for (int i=0;i<entries.size();++i) {
+        auto app=entries[i].toObject(); prepareStartup(app,canceled); entries[i]=app;
+        if (!writeApps(entries)) return "Runtime ready, but preparation results could not be saved.";
+        const QString status=app.value("startupPreparation").toObject().value("status").toString();
+        if (status=="failed" || status=="skipped") ++failures;
+        if (status=="canceled") return "Runtime ready; startup preparation canceled. Remaining apps prepare on their next launch.";
+    }
+    return failures ? "Runtime ready; some startup caches could not be prepared. See each app's startupPreparation result." : QString();
 }
 // Run ATL against disposable app data: installation must not execute app startup
 // code against an existing user's profile. Publish only its verified APK result.
@@ -1111,8 +1175,16 @@ private:
             log->moveCursor(QTextCursor::End); log->insertPlainText(QString::fromLocal8Bit(process.readAll())); log->ensureCursorVisible();
         });
         auto finish = [&](bool ok) {
+            QString preparationWarning;
+            if (ok && !canceled) {
+                label->setText("Preparing installed apps for faster startup…");
+                auto lock=lockLibrary(this);
+                preparationWarning=lock ? prepareInstalledStartups([&]{return canceled;}) : "Runtime ready; Shelf was busy, so startup preparation was skipped.";
+                apps=readApps();
+            }
             dialog.busy = false; dialog.setBackText("‹ Back"); stop->setEnabled(false); bar->setRange(0, 1); bar->setValue(1); close->setEnabled(true);
             label->setText(canceled ? "Update canceled. Run the update again to finish building Android support." : ok ? "ATL is up to date. See the log below for build details." : "ATL update failed. See the log below; you can retry the update.");
+            if (!preparationWarning.isEmpty()) label->setText(preparationWarning);
             if (ok) for (const auto &app : apps) updateDesktop(app.toObject(), atlPath->text());
 #ifndef ATL_SHELF_TESTING
         bool missingIcons = false;
@@ -1279,9 +1351,11 @@ private:
             }
             writeApps(apps);
         }
+        const QString preparationWarning=prepareInstalledStartups();
+        apps=readApps();
         for (const QJsonValue &value : apps) updateDesktop(value.toObject(), atl);
         QProcess::execute("kbuildsycoca6", {"--noincremental"}); reload();
-        mobileNotice(this, "ATL is ready", "The Android runtime is installed and configured. New apps will use it automatically with the selected display settings.");
+        mobileNotice(this, "ATL is ready", "The Android runtime is installed and configured. New apps will use it automatically with the selected display settings." + (preparationWarning.isEmpty() ? QString() : "\n"+preparationWarning));
     }
     void reload() {
         apps = readApps(); appsList->clear(); refreshWelcome();
@@ -1315,7 +1389,7 @@ private:
         const bool canAutoUpdate = source == "github" || source == "fdroid";
         dailyCheck->setChecked(o.value("daily").toBool()); dailyCheck->setEnabled(canAutoUpdate); checkButton->setEnabled(canAutoUpdate);
         QString version = o.value("version").toString(); if (version.isEmpty()) version = "Unknown version";
-        status->setText("Installed · " + version + (o.value("updateError").toString().isEmpty() ? QString() : "\nAutomatic updates need attention. Save app settings to retry.")); saveFeedback->clear(); saveButton->setText("Save"); pages->setCurrentIndex(1);
+        status->setText("Installed · " + version + (o.value("updateError").toString().isEmpty() ? QString() : "\nAutomatic updates need attention. Save app settings to retry.") + "\n" + o.value("startupPreparation").toObject().value("message").toString()); saveFeedback->clear(); saveButton->setText("Save"); pages->setCurrentIndex(1);
     }
     void saveDetails() {
         auto lock = lockLibrary(this); if (!lock) return; loadLatestForAction();
@@ -1560,7 +1634,7 @@ private:
             QJsonArray previousApps = apps; apps.append(o); if (!writeApps(apps)) { apps = previousApps; unregisterApp(o); QDir(appDir(o)).removeRecursively(); mobileNotice(&dialog, "Save failed", "Could not save the app library."); return; }
             updateDesktop(o, atlPath->text()); QString timerMessage; const bool timerEnabled = !o.value("daily").toBool() || writeTimer(o, true, &timerMessage);
             if (!timerEnabled) { o["daily"] = false; o["updateError"] = timerMessage; apps[apps.size() - 1] = o; writeApps(apps); }
-            dialog.accept(); reload(); openDetails(apps.size() - 1); status->setText("Installed · ready to open" + (timerEnabled ? QString() : "\nAutomatic updates could not be enabled."));
+            dialog.accept(); reload(); openDetails(apps.size() - 1); status->setText("Installed · ready to open\n" + o.value("startupPreparation").toObject().value("message").toString() + (timerEnabled ? QString() : "\nAutomatic updates could not be enabled."));
             if (!timerEnabled) QTimer::singleShot(0, this, [this, display, timerMessage] { mobileNotice(this, "App installed", display + " was installed, but its daily update timer could not be enabled. You can still update it with ‘Update app’.\n\n" + timerMessage); });
         });
         auto refreshInstall = [&] {
