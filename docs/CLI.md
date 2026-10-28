@@ -211,3 +211,28 @@ registration, including with `--keep-data` (which retains private files).
 Custom data-directory overrides cannot be used to launch a separate profile;
 legacy custom data needs migration before launching. Dry runs do not migrate
 old entries or run ATL.
+
+### Automatic startup preparation
+
+After successful installation/replacement/update, Shelf asks compatible ATL
+runtimes to prepare their ART cache with `--prepare`. This happens after the APK
+is published at its final `registeredApkPath`, with the same launcher, profile,
+working directory and environment as normal launch. It does not start Android
+application code. Runtime setup and updates also prepare installed apps, except
+apps currently running. This moves compilation to installation/update time;
+it does not eliminate application initialization or native-library setup.
+
+`show`, `install`, `replace` and `update` expose `startupPreparation` with
+`status` (`ready`, `unsupported`, `failed`, `skipped`, or `canceled`), `message`,
+`logPath` and UTC `at`. Runtime setup/update additionally return
+`startupPreparationWarning` when preparation is incomplete. Runtime update
+success still means the runtime build succeeded, not that every cache is ready.
+Check the per-app statuses as well.
+
+A prepared result requires both exit status zero and ATL's explicit success
+marker for the final APK path. Older runtimes without `--prepare` remain usable.
+Preparation has a five-minute per-app limit and cancellation kills its process
+group. A preparation failure/cancellation retains the successful installation;
+normal launch can compile the cache on demand. Replacing the APK or rerunning
+runtime setup/update retries preparation. Logs are stored in each Shelf app
+directory as `startup-preparation.log` (replaced on each attempt).

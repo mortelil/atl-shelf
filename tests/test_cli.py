@@ -57,6 +57,73 @@ class CliTest(unittest.TestCase):
     def install(self, id='sample', *extra):
         return self.call('install', '--source', 'local', '--value', str(self.apk), '--id', id, *extra)[0]
 
+    def preparation_runtime(self, body):
+        original = self.runtime.read_text()
+        self.runtime.write_text(original.replace('#!/bin/sh\n', '#!/bin/sh\n' +
+            'if [ "$2" = --help ]; then echo "Usage: --prepare APK"; exit 0; fi\n' +
+            'if [ "$2" = --prepare ]; then\n' + body + '\nexit 0; fi\n', 1))
+
+    def test_preparation_final_path_environment_and_replacement(self):
+        self.preparation_runtime('test -f "$1" || exit 3\n'
+            'printf "%s\\n" "$1" "$ANDROID_APP_DATA_DIR" "$CUSTOM_PREP" "$PWD" >> "$HOME/prepared"\n'
+            'echo "ATL PREPARE OK: $1"')
+        self.call('settings', '--set', json.dumps({'runtimeEnv': {'CUSTOM_PREP': 'same-environment'}}))
+        entry = self.install()
+        self.assertEqual(entry['startupPreparation']['status'], 'ready')
+        captured = (self.base / 'prepared').read_text().splitlines()
+        launch = self.call('launch', 'sample', '--dry-run')[0]
+        self.assertEqual(captured[:3], [entry['registeredApkPath'],
+                         launch['environment']['ANDROID_APP_DATA_DIR'], 'same-environment'])
+        self.assertEqual(captured[3], str(self.bin))
+        entry = self.call('replace', 'sample', '--apk', str(self.apk))[0]
+        self.assertEqual(entry['startupPreparation']['status'], 'ready')
+        self.assertEqual(len((self.base / 'prepared').read_text().splitlines()), 8)
+        # Switching/reconfiguring the runtime also prepares existing apps.
+        self.call('runtime', 'setup', '--source', 'existing', '--binary', str(self.runtime))
+        self.assertEqual(len((self.base / 'prepared').read_text().splitlines()), 12)
+
+    def test_preparation_accepts_art_log_terminator(self):
+        self.preparation_runtime('printf "\\000ATL PREPARE OK: %s\\n" "$1"')
+        self.assertEqual(self.install()['startupPreparation']['status'], 'ready')
+
+    def test_preparation_requires_success_marker_and_preserves_install(self):
+        self.preparation_runtime('echo no-marker')
+        entry = self.install()
+        self.assertEqual(entry['startupPreparation']['status'], 'failed')
+        self.assertTrue(Path(entry['registeredApkPath']).is_file())
+        self.assertIn('no-marker', Path(entry['startupPreparation']['logPath']).read_text())
+        self.runtime.write_text(self.runtime.read_text().replace('echo no-marker', 'echo "ATL PREPARE OK: $1"; exit 9'))
+        entry = self.call('replace', 'sample', '--apk', str(self.apk))[0]
+        self.assertEqual(entry['startupPreparation']['status'], 'failed')
+        self.assertTrue(Path(entry['registeredApkPath']).is_file())
+
+    def test_cancel_preparation_keeps_install_and_stops_child(self):
+        self.preparation_runtime('sleep 60 &\nchild=$!\necho "$child" > "$HOME/prepare-child"\nwait "$child"')
+        process = subprocess.Popen([str(BINARY), 'cli', 'install', '--source', 'local',
+            '--value', str(self.apk), '--id', 'sample'], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        marker = self.base / 'prepare-child'
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertTrue(marker.exists())
+        process.send_signal(signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=10)
+        result = json.loads(stdout)
+        self.assertTrue(result['ok'], stderr)  # Installation already committed.
+        self.assertEqual(result['result']['startupPreparation']['status'], 'canceled')
+        self.assertTrue(Path(result['result']['registeredApkPath']).is_file())
+        child = Path('/proc') / marker.read_text().strip() / 'stat'
+        deadline = time.monotonic() + 3
+        while child.exists() and child.read_text().split()[2] != 'Z' and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertTrue(not child.exists() or child.read_text().split()[2] == 'Z')
+
+    def test_old_runtime_remains_installable(self):
+        entry = self.install()
+        self.assertEqual(entry['startupPreparation']['status'], 'unsupported')
+        self.assertTrue(Path(entry['registeredApkPath']).is_file())
+
     def test_github_runtime_artifacts_supply_environment_and_preserve_overrides(self):
         self.install()
         self.call('settings', '--set', '{"runtimeType":"github"}')
