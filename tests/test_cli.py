@@ -82,6 +82,10 @@ class CliTest(unittest.TestCase):
         self.call('runtime', 'setup', '--source', 'existing', '--binary', str(self.runtime))
         self.assertEqual(len((self.base / 'prepared').read_text().splitlines()), 12)
 
+    def test_preparation_accepts_art_log_terminator(self):
+        self.preparation_runtime('printf "\\000ATL PREPARE OK: %s\\n" "$1"')
+        self.assertEqual(self.install()['startupPreparation']['status'], 'ready')
+
     def test_preparation_requires_success_marker_and_preserves_install(self):
         self.preparation_runtime('echo no-marker')
         entry = self.install()

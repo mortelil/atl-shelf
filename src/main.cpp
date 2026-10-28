@@ -858,7 +858,14 @@ static void prepareStartup(QJsonObject &app, const std::function<bool()> &cancel
     output.clear();
     const bool ok=run("--prepare",300000,&output);
     const QByteArray marker="ATL PREPARE OK: "+registeredApk(app).toUtf8();
-    if (ok && output.split('\n').contains(marker)) record("ready","Startup cache prepared.");
+    // ART's log sink can leave NUL terminators before stdout lines. Strip
+    // only that prefix; still require an exact marker for this APK.
+    bool confirmed=false;
+    for (auto line : output.split('\n')) {
+        while (line.startsWith('\0')) line.remove(0,1);
+        if (line==marker) confirmed=true;
+    }
+    if (ok && confirmed) record("ready","Startup cache prepared.");
     else record(interrupted()?"canceled":"failed",error.isEmpty()?"Installed successfully; startup preparation failed. See log.":error);
 }
 // Caller holds the library lock. Persist each outcome, including partial runs.

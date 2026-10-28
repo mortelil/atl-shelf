@@ -54,7 +54,7 @@ private slots:
         put(root + "/settings.json", QJsonDocument(QJsonObject{{"runtimeType", "existing"}, {"atl", dataRoot + "/fake-atl"}, {"launcher", dataRoot + "/fake-atl"}}).toJson());
         put(root + "/apps.json", QJsonDocument(QJsonArray{QJsonObject{{"id", "immich"}, {"name", "Immich"}, {"source", "local"}, {"version", "3.2.4"}, {"width",720}, {"height",1280}}}).toJson());
         put(root + "/apps/immich/app.apk", "fixture");
-        put(dataRoot + "/fake-atl", "#!/bin/sh\nif [ \"$2\" = --install-internal ]; then mkdir -p \"$ANDROID_APP_DATA_DIR/_installed_apks_\"; cp \"$1\" \"$ANDROID_APP_DATA_DIR/_installed_apks_/example.test.apk\"; exit $?; fi\nprintf '%s\\n' \"$ATL_RENDER_SCALE\" \"$@\" > '" + dataRoot.toUtf8() + "/launched'\n");
+        put(dataRoot + "/fake-atl", "#!/bin/sh\nif [ \"$2\" = --help ]; then echo Usage; exit 0; fi\nif [ \"$2\" = --install-internal ]; then mkdir -p \"$ANDROID_APP_DATA_DIR/_installed_apks_\"; cp \"$1\" \"$ANDROID_APP_DATA_DIR/_installed_apks_/example.test.apk\"; exit $?; fi\nprintf '%s\\n' \"$ATL_RENDER_SCALE\" \"$@\" > '" + dataRoot.toUtf8() + "/launched'\n");
         QFile::setPermissions(dataRoot + "/fake-atl", QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
         QFile::remove(dataRoot + "/launched");
     }
